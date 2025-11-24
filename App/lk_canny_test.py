@@ -5,30 +5,53 @@ import numpy as np
 # Parámetros Lucas-Kanade
 # ---------------------------
 lk_params = dict(
-    winSize=(15, 15),
-    maxLevel=2,
+    winSize=(21, 21),
+    maxLevel=3,
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03),
 )
 
 # Puntos de interés
 feature_params = dict(
-    maxCorners=200,
-    qualityLevel=0.3,
-    minDistance=7,
+    maxCorners=300,
+    qualityLevel=0.15,
+    minDistance=10,
     blockSize=7
 )
 
 # Parámetros de detección de movimiento
 MOTION_THRESH = 15
-MIN_FEATURES = 40
-DILATE_ITER = 2
+MIN_FEATURES = 50
+DILATE_ITER = 4
 
 # Filtro de outliers de movimiento
-MAX_DISPLACEMENT = 40.0  # píxeles
+MAX_DISPLACEMENT = 60.0  # píxeles
 
-# Canny
-CANNY_LOW = 50
-CANNY_HIGH = 150
+# Parámetros Canny mejorado
+CANNY_SENS = 0.5
+CLAHE_CLIP_LIMIT = 6
+CLAHE_TILE_SIZE = 2
+BLUR_KERNEL = 5
+
+# Factor de escala para la ventana (0.5 = mitad del tamaño, 0.75 = 75%, etc.)
+DISPLAY_SCALE = 0.5
+
+
+def canny_mejorado(img, sens=0.33, clip_limit=2.0, tile_size=8, blur_kernel=5):
+    """Canny con CLAHE + Blur para mejor detección de bordes"""
+    # 1. CLAHE para ecualizar
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(tile_size, tile_size))
+    equalized = clahe.apply(img)
+    
+    # 2. Blur para reducir ruido/texturas
+    blurred = cv2.GaussianBlur(equalized, (blur_kernel, blur_kernel), 0)
+    
+    # 3. Canny con thresholds automáticos
+    med = np.median(blurred)
+    low_thresh = int(max(0, (1.0 - sens) * med))
+    high_thresh = int(min(255, (1.0 + sens) * med))
+    edges = cv2.Canny(blurred, low_thresh, high_thresh)
+    
+    return edges
 
 
 def main():
@@ -76,8 +99,14 @@ def main():
         _, motion_mask = cv2.threshold(diff, MOTION_THRESH, 255, cv2.THRESH_BINARY)
         motion_mask = cv2.dilate(motion_mask, None, iterations=DILATE_ITER)
 
-        # 2) Canny
-        edges = cv2.Canny(frame_gray, CANNY_LOW, CANNY_HIGH)
+        # 2) Canny MEJORADO
+        edges = canny_mejorado(
+            frame_gray,
+            sens=CANNY_SENS,
+            clip_limit=CLAHE_CLIP_LIMIT,
+            tile_size=CLAHE_TILE_SIZE,
+            blur_kernel=BLUR_KERNEL
+        )
 
         # 3) Trackeo usando movimiento
         frame_count += 1
@@ -129,16 +158,6 @@ def main():
                             -1
                         )
 
-                    xs = good_new[:, 0]
-                    ys = good_new[:, 1]
-                    # min_x, max_x = int(np.min(xs)), int(np.max(xs))
-                    # min_y, max_y = int(np.min(ys)), int(np.max(ys))
-                    # cv2.rectangle(
-                    #     processed_motion,
-                    #     (min_x, min_y), (max_x, max_y),
-                    #     (255, 0, 0), 2
-                    # )
-
                     p0_motion = good_new.reshape(-1, 1, 2)
                 else:
                     p0_motion = None
@@ -147,11 +166,9 @@ def main():
 
         processed_motion = cv2.add(processed_motion, mask_tracks_motion)
 
-        # 4) Trackeo usando Canny
-        # Esto sólo toma puntos que están en los bordes detectados por Canny, sería bueno tomar los que están dentro de los contornos.
+        # 4) Trackeo usando Canny mejorado
         processed_canny = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
 
-        # buscamos esquinas SOLO en bordes Canny
         need_new_features_canny = False
         if p0_canny is None:
             need_new_features_canny = True
@@ -161,7 +178,7 @@ def main():
         if need_new_features_canny:
             p0_canny = cv2.goodFeaturesToTrack(
                 prev_gray,
-                mask=edges,   # máscara = bordes Canny
+                mask=edges,
                 **feature_params
             )
 
@@ -188,25 +205,15 @@ def main():
                         mask_tracks_canny = cv2.line(
                             mask_tracks_canny,
                             (int(a), int(b)), (int(c), int(d)),
-                            (255, 0, 255), 2  # magenta
+                            (255, 0, 255), 2
                         )
                         processed_canny = cv2.circle(
                             processed_canny,
                             (int(a), int(b)),
                             4,
-                            (0, 255, 255),  # amarillo
+                            (0, 255, 255),
                             -1
                         )
-
-                    xs = good_new_c[:, 0]
-                    ys = good_new_c[:, 1]
-                    # min_x, max_x = int(np.min(xs)), int(np.max(xs))
-                    # min_y, max_y = int(np.min(ys)), int(np.max(ys))
-                    # cv2.rectangle(
-                    #     processed_canny,
-                    #     (min_x, min_y), (max_x, max_y),
-                    #     (255, 255, 0), 2  # cian-amarillo
-                    # )
 
                     p0_canny = good_new_c.reshape(-1, 1, 2)
                 else:
@@ -232,7 +239,12 @@ def main():
         bottom_row = np.hstack((edges_bgr, processed_canny))
         combined = np.vstack((top_row, bottom_row))
 
-        cv2.imshow("Arriba: original | LK movimiento  |  Abajo: Canny | LK usando Canny", combined)
+        # Redimensionar la ventana completa
+        display_h = int(combined.shape[0] * DISPLAY_SCALE)
+        display_w = int(combined.shape[1] * DISPLAY_SCALE)
+        combined_resized = cv2.resize(combined, (display_w, display_h))
+
+        cv2.imshow("Arriba: original | LK movimiento  |  Abajo: Canny MEJORADO | LK usando Canny", combined_resized)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
