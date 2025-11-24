@@ -24,7 +24,10 @@ MIN_FEATURES = 5       # Si hay menos puntos, volvemos a detectar
 DILATE_ITER = 2         # Cuántas veces dilatamos la máscara de movimiento
 MAX_DISPLACEMENT = 100.0  # en píxeles, para ignorar puntos que salen volando
 
-
+########################## Prueba CLAHE
+# CLAHE para robustez al contraste
+clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+##########################
 
 def main():
     cap = cv2.VideoCapture(0)
@@ -39,10 +42,10 @@ def main():
         print("No se pudo leer el primer frame de la cámara.")
         cap.release()
         return
-    first_frame = cv2.flip(first_frame, 1)  # <--- AGREGAR ESTA LÍNEA
+    first_frame = cv2.flip(first_frame, 1)  # Flip horizontal para reflejar movimientos naturales
 
-
-    prev_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+    prev_gray_raw = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+    prev_gray = clahe.apply(prev_gray_raw)   # <-- ecualizado
 
     # No tenemos puntos al principio
     p0 = None
@@ -57,7 +60,8 @@ def main():
             break
         frame = cv2.flip(frame, 1)  # Para que esté flippeada para que refleje movimientos naturales.
 
-        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame_gray_raw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frame_gray = clahe.apply(frame_gray_raw)
 
         #Detección de movimiento global
         diff = cv2.absdiff(frame_gray, prev_gray)
@@ -143,14 +147,11 @@ def main():
         combined = np.hstack((frame, processed))
         cv2.imshow("Izquierda: original | Derecha: trackeo movimiento (Lucas-Kanade)", combined)
 
-        # Si querés ver la máscara de movimiento sola:
-        # cv2.imshow("Motion mask", motion_mask)
-
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
         elif key == ord('e'):
-            mask_tracks = np.zeros_like(frame)  # <--- REINICIA LAS LÍNEAS
+            mask_tracks = np.zeros_like(frame)  #REINICIA LAS LÍNEAS
 
 
     cap.release()
