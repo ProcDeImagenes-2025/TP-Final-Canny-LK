@@ -20,7 +20,7 @@ feature_params = dict(
 
 # Parámetros de detección de movimiento
 MOTION_THRESH = 15
-MIN_FEATURES = 50
+MIN_FEATURES = 200
 DILATE_ITER = 4
 
 # Filtro de outliers de movimiento
@@ -40,6 +40,42 @@ DISPLAY_SCALE = 0.5
 
 # Área mínima para considerar un contorno "real" (en píxeles)
 MIN_CONTOUR_AREA = 100
+
+
+def calculate_brightness(frame):
+    """Calcula el nivel de brillo promedio de la imagen usando el canal V de HSV"""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    v_channel = hsv[:, :, 2]  # Canal V (Value/Brightness)
+    brightness = np.mean(v_channel)
+    return brightness
+
+
+def adjust_canny_params(brightness):
+    """
+    Ajusta CANNY_SENS y BLUR_KERNEL según el nivel de iluminación
+    
+    Brightness range: 0-255
+    - Oscuro (0-80): Más sensibilidad, menos blur
+    - Medio (80-170): Valores balanceados
+    - Claro (170-255): Menos sensibilidad, más blur
+    """
+    if brightness < 80:  # Escena oscura
+        sens = 0.40  # Más sensible para detectar bordes débiles
+        blur = 7     # Menos blur para preservar detalles
+        clip = 5.0   # CLAHE muy alto para compensar oscuridad
+        tile = 2     # Muy local
+    elif brightness < 170:  # Escena con iluminación media
+        sens = 0.5
+        blur = 17
+        clip = 3
+        tile = 8
+    else:  # Escena muy iluminada
+        sens = 0.25  # Menos sensible (evita ruido/texturas)
+        blur = 1     # Más blur para suavizar
+        clip = 1.5   # CLAHE bajo (ya hay buen contraste)
+        tile = 8     # Más global
+    
+    return sens, blur, clip, tile
 
 
 def canny_mejorado(img, sens=0.33, clip_limit=2.0, tile_size=8, blur_kernel=5):
@@ -101,18 +137,22 @@ def main():
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # NUEVO: Calcular brillo y ajustar parámetros automáticamente
+        brightness = calculate_brightness(frame)
+        adaptive_sens, adaptive_blur, adaptive_clip, adaptive_tile = adjust_canny_params(brightness)
+
         # 1) Detección de movimiento global
         diff = cv2.absdiff(frame_gray, prev_gray)
         _, motion_mask = cv2.threshold(diff, MOTION_THRESH, 255, cv2.THRESH_BINARY)
         motion_mask = cv2.dilate(motion_mask, None, iterations=DILATE_ITER)
 
-        # 2) Canny MEJORADO
+        # 2) Canny MEJORADO con parámetros adaptativos
         edges = canny_mejorado(
             frame_gray,
-            sens=CANNY_SENS,
-            clip_limit=CLAHE_CLIP_LIMIT,
-            tile_size=CLAHE_TILE_SIZE,
-            blur_kernel=BLUR_KERNEL
+            sens=adaptive_sens,
+            clip_limit=adaptive_clip,
+            tile_size=adaptive_tile,
+            blur_kernel=adaptive_blur
         )
 
         # 2.1) ELIMINAR BORDES ESTÁTICOS
@@ -285,6 +325,18 @@ def main():
             0.7,
             (0, 255, 0),
             2,
+            cv2.LINE_AA
+        )
+
+        # Mostrar información de iluminación y parámetros adaptativos
+        cv2.putText(
+            edges_bgr,
+            f"Brillo: {int(brightness)} | Sens: {adaptive_sens:.2f} | Blur: {adaptive_blur}",
+            (10, 55),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 0),
+            1,
             cv2.LINE_AA
         )
 
