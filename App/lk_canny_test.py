@@ -26,17 +26,20 @@ DILATE_ITER = 4
 # Filtro de outliers de movimiento
 MAX_DISPLACEMENT = 100.0  # píxeles
 
+# Umbral para considerar que un borde está "quieto"
+STATIC_EDGE_THRESHOLD = 1  # Si el borde no cambia más de 5 píxeles, se ignora
+
 # Parámetros Canny mejorado
-CANNY_SENS = 0.5
+CANNY_SENS = 0.33
 CLAHE_CLIP_LIMIT = 2.0
 CLAHE_TILE_SIZE = 8
-BLUR_KERNEL = 1
+BLUR_KERNEL = 5
 
 # Factor de escala para la ventana (0.5 = mitad del tamaño, 0.75 = 75%, etc.)
 DISPLAY_SCALE = 0.5
 
 # Área mínima para considerar un contorno "real" (en píxeles)
-MIN_CONTOUR_AREA = 80
+MIN_CONTOUR_AREA = 100
 
 
 def canny_mejorado(img, sens=0.33, clip_limit=2.0, tile_size=8, blur_kernel=5):
@@ -75,6 +78,7 @@ def main():
     first_frame = cv2.flip(first_frame, 1)
 
     prev_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+    prev_edges = None  # Para almacenar bordes del frame anterior
 
     # Trackeo basado en movimiento
     p0_motion = None
@@ -110,15 +114,29 @@ def main():
             tile_size=CLAHE_TILE_SIZE,
             blur_kernel=BLUR_KERNEL
         )
-        kernel = np.ones((3, 3), np.uint8)   # tamaño 3x3 → ensancha 1 píxel
-        edges_thick = cv2.dilate(edges, kernel, iterations=1)
 
+        # 2.1) ELIMINAR BORDES ESTÁTICOS
+        if prev_edges is not None:
+            # Diferencia entre bordes actuales y anteriores
+            edge_diff = cv2.absdiff(edges, prev_edges)
+            
+            # Solo mantener bordes que cambiaron
+            _, moving_edges_mask = cv2.threshold(edge_diff, STATIC_EDGE_THRESHOLD, 255, cv2.THRESH_BINARY)
+            
+            # Combinar: bordes actuales AND bordes que se movieron
+            edges_moving = cv2.bitwise_and(edges, moving_edges_mask)
+        else:
+            edges_moving = edges.copy()
+        
+        # Actualizar bordes previos
+        prev_edges = edges.copy()
 
-        # 2.1) Contar contornos cerrados en la imagen de Canny
         kernel = np.ones((3, 3), np.uint8)
-        edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=1)
-        contours, _ = cv2.findContours(edges_closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        edges_thick = cv2.dilate(edges_moving, kernel, iterations=1)
 
+        # 2.2) Contar contornos cerrados solo en bordes en movimiento
+        edges_closed = cv2.morphologyEx(edges_moving, cv2.MORPH_CLOSE, kernel, iterations=1)
+        contours, _ = cv2.findContours(edges_closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
         closed_contours = []
         for cnt in contours:
@@ -129,6 +147,9 @@ def main():
 
         num_closed = len(closed_contours)
 
+        # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO
+        contours_only = np.zeros_like(frame_gray)
+        cv2.drawContours(contours_only, closed_contours, -1, (255), 2)
 
         # 3) Trackeo usando movimiento
         frame_count += 1
@@ -188,8 +209,8 @@ def main():
 
         processed_motion = cv2.add(processed_motion, mask_tracks_motion)
 
-        # 4) Trackeo usando Canny mejorado
-        processed_canny = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        # 4) Trackeo usando Canny mejorado (solo bordes en movimiento)
+        processed_canny = cv2.cvtColor(edges_moving, cv2.COLOR_GRAY2BGR)
 
         need_new_features_canny = False
         if p0_canny is None:
@@ -200,7 +221,7 @@ def main():
         if need_new_features_canny:
             p0_canny = cv2.goodFeaturesToTrack(
                 prev_gray,
-                mask=edges,
+                mask=edges_moving,  # Solo detectar en bordes que se mueven
                 **feature_params
             )
 
@@ -249,16 +270,16 @@ def main():
         prev_gray = frame_gray.copy()
 
         # Pasar edges a BGR para poder apilarlo
-        edges_bgr = cv2.cvtColor(edges_thick, cv2.COLOR_GRAY2BGR)
+        edges_bgr = cv2.cvtColor(contours_only, cv2.COLOR_GRAY2BGR)
 
         #############   MOSTRAR CANTIDAD DE CONTRORNOS CERRADOS DETECTADOS  #############
         # Dibujar opcionalmente los contornos cerrados
-        cv2.drawContours(edges_bgr, closed_contours, -1, (0, 0, 255), 1)
+        cv2.drawContours(edges_bgr, closed_contours, -1, (0, 255, 0), 2)
 
-        # Mostrar la cantidad de contornos cerrados
+        # Mostrar la cantidad de contornos cerrados EN MOVIMIENTO
         cv2.putText(
             edges_bgr,
-            f"Contornos cerrados: {num_closed}",
+            f"Contornos en movimiento: {num_closed}",
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
