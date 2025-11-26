@@ -27,7 +27,7 @@ DILATE_ITER = 4
 MAX_DISPLACEMENT = 100.0  # píxeles
 
 # Umbral para considerar que un borde está "quieto"
-STATIC_EDGE_THRESHOLD = 1  # Si el borde no cambia más de 5 píxeles, se ignora
+STATIC_EDGE_THRESHOLD = 3   # Si el borde no cambia más de 5 píxeles, se ignora
 
 # Parámetros Canny mejorado
 CANNY_SENS = 0.33
@@ -40,6 +40,12 @@ DISPLAY_SCALE = 0.5
 
 # Área mínima para considerar un contorno "real" (en píxeles)
 MIN_CONTOUR_AREA = 100
+
+# Parámetros para filtrar contornos "estáticos" (fondo)
+STATIC_CONTOUR_FRAMES = 8      # frames necesarios para marcarlo como estático
+STATIC_MATCH_DIST = 10.0       # tolerancia de distancia entre centros (px)
+STATIC_SIZE_TOL = 0.4          # tolerancia de tamaño (±40%)
+STATIC_FORGET_FRAMES = 60      # si no aparece en 60 frames, se descarta del fondo
 
 
 def calculate_brightness(frame):
@@ -95,6 +101,80 @@ def canny_mejorado(img, sens=0.33, clip_limit=2.0, tile_size=8, blur_kernel=5):
     
     return edges
 
+def update_static_contours(closed_contours, static_contours, frame_idx):
+    """
+    Actualiza la lista de contornos estáticos y devuelve
+    sólo los contornos que NO son estáticos (dinámicos).
+    """
+    dynamic_contours = []
+
+    for cnt in closed_contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+
+        best_idx = None
+        best_dist = 1e9
+
+        # Buscar si este contorno coincide con alguno ya visto
+        for i, sc in enumerate(static_contours):
+            dist = np.hypot(cx - sc["cx"], cy - sc["cy"])
+            if dist > STATIC_MATCH_DIST:
+                continue
+
+            # Comparar tamaño (evitar matchear cosas muy distintas)
+            if sc["w"] == 0 or sc["h"] == 0:
+                continue
+
+            if abs(w - sc["w"]) > sc["w"] * STATIC_SIZE_TOL:
+                continue
+            if abs(h - sc["h"]) > sc["h"] * STATIC_SIZE_TOL:
+                continue
+
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+
+        if best_idx is not None:
+            # Actualizar contorno existente
+            sc = static_contours[best_idx]
+            sc["cx"] = 0.5 * (sc["cx"] + cx)
+            sc["cy"] = 0.5 * (sc["cy"] + cy)
+            sc["w"] = 0.5 * (sc["w"] + w)
+            sc["h"] = 0.5 * (sc["h"] + h)
+            sc["life"] += 1
+            sc["last_seen"] = frame_idx
+
+            is_static = sc["life"] >= STATIC_CONTOUR_FRAMES
+        else:
+            # Contorno nuevo
+            static_contours.append(
+                {
+                    "cx": cx,
+                    "cy": cy,
+                    "w": float(w),
+                    "h": float(h),
+                    "life": 1,
+                    "last_seen": frame_idx,
+                }
+            )
+            is_static = False
+
+        # Sólo nos quedamos con los contornos que TODAVÍA no
+        # fueron clasificados como estáticos
+        if not is_static:
+            dynamic_contours.append(cnt)
+
+    # Olvidar contornos que hace mucho que no aparecen
+    static_contours[:] = [
+        sc
+        for sc in static_contours
+        if frame_idx - sc["last_seen"] <= STATIC_FORGET_FRAMES
+    ]
+
+    return dynamic_contours
+
+
 
 def main():
     cap = cv2.VideoCapture(0)
@@ -125,6 +205,10 @@ def main():
     mask_tracks_canny = np.zeros_like(first_frame)
 
     frame_count = 0
+    # Contornos que consideramos parte del fondo (estáticos)
+    # Cada elemento: {"cx", "cy", "w", "h", "life", "last_seen"}
+    static_contours = []
+
 
     while True:
         ret, frame = cap.read()
@@ -185,11 +269,27 @@ def main():
                 continue
             closed_contours.append(cnt)
 
-        num_closed = len(closed_contours)
+        # Filtrar contornos que son "estáticos" (aparecen siempre en el mismo lugar)
+        dynamic_contours = update_static_contours(
+            closed_contours, static_contours, frame_count
+        )
 
-        # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO
-        contours_only = np.zeros_like(frame_gray)
-        cv2.drawContours(contours_only, closed_contours, -1, (255), 2)
+        num_closed = len(dynamic_contours)
+
+        # --- Bordes tipo Canny que sobreviven al filtro de "estático" ---
+        # 1) Máscara con las zonas de contornos dinámicos
+        dynamic_mask = np.zeros_like(edges_moving)
+        cv2.drawContours(dynamic_mask, dynamic_contours, -1, 255, thickness=1)
+
+        # 2) Nos quedamos sólo con los bordes en movimiento que caen dentro
+        #    de esos contornos dinámicos
+        contours_only = cv2.bitwise_and(edges_moving, dynamic_mask)
+
+
+        # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO (no estáticos)
+        # contours_only = np.zeros_like(frame_gray)
+        # cv2.drawContours(contours_only, dynamic_contours, -1, (255), 2)
+        contours_only = edges_moving.copy()
 
         # 3) Trackeo usando movimiento
         frame_count += 1
@@ -314,7 +414,8 @@ def main():
 
         #############   MOSTRAR CANTIDAD DE CONTRORNOS CERRADOS DETECTADOS  #############
         # Dibujar opcionalmente los contornos cerrados
-        cv2.drawContours(edges_bgr, closed_contours, -1, (0, 255, 0), 2)
+        cv2.drawContours(edges_bgr, dynamic_contours, -1, (0, 255, 0), 2)
+
 
         # Mostrar la cantidad de contornos cerrados EN MOVIMIENTO
         cv2.putText(
