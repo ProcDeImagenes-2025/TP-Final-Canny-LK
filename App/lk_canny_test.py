@@ -24,7 +24,7 @@ MIN_FEATURES = 200
 DILATE_ITER = 4
 
 # Filtro de outliers de movimiento
-MAX_DISPLACEMENT = 100.0  # píxeles
+MAX_DISPLACEMENT = 1000.0  # píxeles
 
 # Umbral para considerar que un borde está "quieto"
 STATIC_EDGE_THRESHOLD = 3   # Si el borde no cambia más de 5 píxeles, se ignora
@@ -48,13 +48,15 @@ STATIC_SIZE_TOL = 0.4          # tolerancia de tamaño (±40%)
 STATIC_FORGET_FRAMES = 60      # si no aparece en 60 frames, se descarta del fondo
 
 
-def calculate_brightness(frame):
-    """Calcula el nivel de brillo promedio de la imagen usando el canal V de HSV"""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    v_channel = hsv[:, :, 2]  # Canal V (Value/Brightness)
-    brightness = np.mean(v_channel)
-    return brightness
+# def calculate_brightness(frame):
+#     """Calcula el nivel de brillo promedio de la imagen usando el canal V de HSV"""
+#     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+#     v_channel = hsv[:, :, 2]  # Canal V (Value/Brightness)
+#     brightness = np.mean(v_channel)
+#     return brightness
 
+def calculate_brightness(frame):
+    return float(np.mean(frame))
 
 def adjust_canny_params(brightness):
     """
@@ -230,6 +232,13 @@ def main():
         _, motion_mask = cv2.threshold(diff, MOTION_THRESH, 255, cv2.THRESH_BINARY)
         motion_mask = cv2.dilate(motion_mask, None, iterations=DILATE_ITER)
 
+        # 1.1) Bordes "rápidos" usando solo la diferencia temporal
+        blur_diff = cv2.GaussianBlur(diff, (3, 3), 0)
+        # Umbral medio-alto para quedarnos sólo con cambios fuertes
+        _, edges_diff = cv2.threshold(blur_diff, 25, 255, cv2.THRESH_BINARY)
+        edges_diff = cv2.bitwise_and(edges_diff, motion_mask)
+
+
         # 2) Canny MEJORADO con parámetros adaptativos
         edges = canny_mejorado(
             frame_gray,
@@ -239,7 +248,10 @@ def main():
             blur_kernel=adaptive_blur
         )
 
-        # 2.1) ELIMINAR BORDES ESTÁTICOS
+        # 2.1) Combinar bordes espaciales + bordes temporales
+        edges = cv2.bitwise_or(edges, edges_diff)
+
+        # 2.2) ELIMINAR BORDES ESTÁTICOS
         if prev_edges is not None:
             # Diferencia entre bordes actuales y anteriores
             edge_diff = cv2.absdiff(edges, prev_edges)
@@ -289,7 +301,7 @@ def main():
         # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO (no estáticos)
         # contours_only = np.zeros_like(frame_gray)
         # cv2.drawContours(contours_only, dynamic_contours, -1, (255), 2)
-        contours_only = edges_moving.copy()
+        # contours_only = edges_moving.copy()
 
         # 3) Trackeo usando movimiento
         frame_count += 1
@@ -442,11 +454,11 @@ def main():
         )
 
 
-        # Asegurar mismo tamaño
-        h, w = frame.shape[:2]
-        processed_motion = cv2.resize(processed_motion, (w, h))
-        edges_bgr = cv2.resize(edges_bgr, (w, h))
-        processed_canny = cv2.resize(processed_canny, (w, h))
+        # # Asegurar mismo tamaño
+        # h, w = frame.shape[:2]
+        # processed_motion = cv2.resize(processed_motion, (w, h))
+        # edges_bgr = cv2.resize(edges_bgr, (w, h))
+        # processed_canny = cv2.resize(processed_canny, (w, h))
 
         top_row = np.hstack((frame, processed_motion))
         bottom_row = np.hstack((edges_bgr, processed_canny))
