@@ -36,9 +36,13 @@ La idea principal es detectar features en el primer frame para hacer el trackeo 
 
 Relacionado al algoritmo de `Canny`:
 - La importancia de ajustar los parámetros de detección en función del brillo y el contraste del frame para mejorar la detección de bordes.
+
     ![Canny_Brightness](readme_images/contraste.png)
+
 - La necesidad de considerar la diferencia entre frames consecutivos para evitar efectos de motion blur.
+
     ![Canny_Diff](readme_images/motion_blur.png)
+
 - La utilidad de la dilatación para mejorar la detección de bordes en presencia de ruido.
 
 ## Filtrado de bordes estáticos mediante análisis temporal

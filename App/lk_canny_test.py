@@ -88,6 +88,17 @@ def get_dynamic_bounding_box(dynamic_contours):
     
     return (int(x_min), int(y_min), int(x_max), int(y_max))
 
+def get_dynamic_bounding_boxes(dynamic_contours):
+    """
+    Crea una lista de bounding boxes, una por cada contorno dinámico.
+    Cada bbox es (x_min, y_min, x_max, y_max).
+    Si no hay contornos, devuelve lista vacía.
+    """
+    bboxes = []
+    for cnt in dynamic_contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        bboxes.append((int(x), int(y), int(x + w), int(y + h)))
+    return bboxes
 
 def filter_points_by_bbox(points, bbox, margin=10):
     """
@@ -126,6 +137,44 @@ def filter_points_by_bbox(points, bbox, margin=10):
     )
     
     return valid
+
+def filter_points_by_bboxes(points, bboxes, margin=10):
+    """
+    Filtra puntos que están dentro de AL MENOS una bounding box (con margen opcional).
+    
+    Args:
+        points: array de puntos (N, 1, 2)
+        bboxes: lista de (x_min, y_min, x_max, y_max)
+        margin: píxeles extra alrededor de cada bbox
+    
+    Returns:
+        array de booleanos de tamaño N indicando qué puntos son válidos
+    """
+    if points is None or len(points) == 0:
+        return np.array([], dtype=bool)
+    
+    if not bboxes:  # lista vacía
+        return np.zeros(len(points), dtype=bool)
+    
+    points_flat = points.reshape(-1, 2)
+    valid_total = np.zeros(len(points_flat), dtype=bool)
+    
+    for (x_min, y_min, x_max, y_max) in bboxes:
+        # Expandir bbox con margen
+        x0 = x_min - margin
+        y0 = y_min - margin
+        x1 = x_max + margin
+        y1 = y_max + margin
+        
+        inside = (
+            (points_flat[:, 0] >= x0) &
+            (points_flat[:, 0] <= x1) &
+            (points_flat[:, 1] >= y0) &
+            (points_flat[:, 1] <= y1)
+        )
+        valid_total |= inside  # OR: punto válido si cae en alguna bbox
+    
+    return valid_total
 
 
 def nothing(x):
@@ -419,7 +468,9 @@ def main():
         #    de esos contornos dinámicos
         contours_only = cv2.bitwise_and(edges_moving, dynamic_mask)
 
-        dynamic_bbox = get_dynamic_bounding_box(dynamic_contours)
+#        dynamic_bbox = get_dynamic_bounding_box(dynamic_contours)
+        dynamic_bboxes = get_dynamic_bounding_boxes(dynamic_contours)
+
 
         # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO (no estáticos)
         # contours_only = np.zeros_like(frame_gray)
@@ -460,16 +511,25 @@ def main():
                 p1_flat = p1.reshape(-1, 2)
 
                 displacements = np.linalg.norm(p1_flat - p0_flat, axis=1)
-                
+
+                # Asegurar que movement_history_motion tenga el mismo tamaño que displacements
+                if movement_history_motion is None or movement_history_motion.shape[0] != displacements.shape[0]:
+                    movement_history_motion = np.zeros_like(displacements)
+
                 movement_history_motion += displacements
+
                  
-                inside_bbox = filter_points_by_bbox(p1, dynamic_bbox, margin=20)
+                # inside_bbox = filter_points_by_bbox(p1, dynamic_bbox, margin=20)
+                inside_bbox = filter_points_by_bboxes(p1, dynamic_bboxes, margin=20)
+
                 # NUEVO: Un punto sobrevive si:
                 # 1. Status válido (st == 1)
                 # 2. Desplazamiento razonable (< MAX_DISPLACEMENT)
                 # 3. Está dentro de bbox O ya se movió antes (tiene historial)
                 has_moved_before = movement_history_motion >= MIN_MOVEMENT_HISTORY
+                # valid = (st == 1) & (displacements < MAX_DISPLACEMENT) & (inside_bbox | has_moved_before)
                 valid = (st == 1) & (displacements < MAX_DISPLACEMENT) & (inside_bbox | has_moved_before)
+
 
                 good_new = p1_flat[valid]
                 good_old = p0_flat[valid]
@@ -522,6 +582,48 @@ def main():
             if p0_canny is not None:
                 movement_history_canny = np.zeros(len(p0_canny), dtype=np.float32)
 
+            # ---------------------------------------------------------------------
+            # Agregar nuevos puntos en bboxes que no tienen ninguno (solo Canny)
+            # ---------------------------------------------------------------------
+            if (not need_new_features_canny) and (p0_canny is not None) and dynamic_bboxes:
+                points_flat = p0_canny.reshape(-1, 2)
+
+                for (x_min, y_min, x_max, y_max) in dynamic_bboxes:
+
+                    # Chequear si EXISTE al menos un punto dentro de esta bbox
+                    inside = (
+                        (points_flat[:, 0] >= x_min) &
+                        (points_flat[:, 0] <= x_max) &
+                        (points_flat[:, 1] >= y_min) &
+                        (points_flat[:, 1] <= y_max)
+                    )
+
+                    if not np.any(inside):
+                        # ---------------------------------------------------------
+                        # NO hay puntos en esta bbox → crear máscara y buscar nuevos
+                        # ---------------------------------------------------------
+                        roi_mask = np.zeros_like(edges_moving)
+                        cv2.rectangle(roi_mask, (x_min, y_min), (x_max, y_max), 255, -1)
+
+                        # Restringimos la ROI a bordes que se mueven
+                        roi_mask = cv2.bitwise_and(roi_mask, edges_moving)
+
+                        new_pts = cv2.goodFeaturesToTrack(
+                            prev_gray,
+                            mask=roi_mask,
+                            **feature_params
+                        )
+
+                        # Si encontramos nuevos puntos, los agregamos al conjunto actual
+                        if new_pts is not None and len(new_pts) > 0:
+                            if p0_canny is None:
+                                p0_canny = new_pts
+                                points_flat = p0_canny.reshape(-1, 2)
+                            else:
+                                p0_canny = np.vstack([p0_canny, new_pts])
+                                points_flat = p0_canny.reshape(-1, 2)
+
+
         if p0_canny is not None:
             p1c, stc, errc = cv2.calcOpticalFlowPyrLK(
                 prev_gray, frame_gray, p0_canny, None, **lk_params
@@ -533,13 +635,21 @@ def main():
                 p1c_flat = p1c.reshape(-1, 2)
 
                 disp_c = np.linalg.norm(p1c_flat - p0c_flat, axis=1)
-                
+
+                # Asegurar que movement_history_canny tenga el mismo tamaño que disp_c
+                if movement_history_canny is None or movement_history_canny.shape[0] != disp_c.shape[0]:
+                    movement_history_canny = np.zeros_like(disp_c)
+
                 movement_history_canny += disp_c
+
                 
-                inside_bbox_c = filter_points_by_bbox(p1c, dynamic_bbox, margin=20)
-                
+                # inside_bbox_c = filter_points_by_bbox(p1c, dynamic_bbox, margin=20)
+                inside_bbox_c = filter_points_by_bboxes(p1c, dynamic_bboxes, margin=20)
+
                 has_moved_before_c = movement_history_canny >= MIN_MOVEMENT_HISTORY
+                # valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT) & (inside_bbox_c | has_moved_before_c)
                 valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT) & (inside_bbox_c | has_moved_before_c)
+
 
                 good_new_c = p1c_flat[valid_c]
                 good_old_c = p0c_flat[valid_c]
@@ -583,10 +693,15 @@ def main():
         cv2.drawContours(edges_bgr, dynamic_contours, -1, (0, 255, 0), 2)
 
 
-        if dynamic_bbox is not None:
-            x_min, y_min, x_max, y_max = dynamic_bbox
-            cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
-            cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+        # if dynamic_bbox is not None:
+        #     x_min, y_min, x_max, y_max = dynamic_bbox
+        #     cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+        #     cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+
+        if dynamic_bboxes:
+            for (x_min, y_min, x_max, y_max) in dynamic_bboxes:
+                cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+                # cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
 
 
         # Mostrar la cantidad de contornos cerrados EN MOVIMIENTO
