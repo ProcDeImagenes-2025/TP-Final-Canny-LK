@@ -55,6 +55,55 @@ STATIC_FORGET_FRAMES = 60      # si no aparece en 60 frames, se descarta del fon
 #     brightness = np.mean(v_channel)
 #     return brightness
 
+calibration_mode = False
+manual_sens = int(CANNY_SENS * 100)  # 0-100
+manual_clip = int(CLAHE_CLIP_LIMIT * 10)  # 0-100 (dividir por 10)
+manual_tile = CLAHE_TILE_SIZE  # 2-16
+manual_blur = BLUR_KERNEL  # 1-31 (impares)
+
+def nothing(x):
+    """Callback vacío para los trackbars"""
+    pass
+
+def create_calibration_window():
+    """Crea ventana de calibración con trackbars"""
+    cv2.namedWindow('Calibración Canny')
+    cv2.createTrackbar('Sensibilidad x100', 'Calibración Canny', manual_sens, 100, nothing)
+    cv2.createTrackbar('CLAHE Clip x10', 'Calibración Canny', manual_clip, 100, nothing)
+    cv2.createTrackbar('CLAHE Tile', 'Calibración Canny', manual_tile, 16, nothing)
+    cv2.createTrackbar('Blur Kernel', 'Calibración Canny', manual_blur, 31, nothing)
+    
+    # Crear imagen informativa
+    info = np.zeros((200, 500, 3), dtype=np.uint8)
+    cv2.putText(info, 'Ajusta los parametros:', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(info, 'Sensibilidad: 0-100 (x0.01)', (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    cv2.putText(info, 'CLAHE Clip: 0-100 (x0.1)', (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    cv2.putText(info, 'CLAHE Tile: 2-16', (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    cv2.putText(info, 'Blur Kernel: 1-31 (impar)', (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    cv2.imshow('Calibración Canny', info)
+
+def get_calibration_params():
+    """Obtiene los valores actuales de los trackbars"""
+    global manual_sens, manual_clip, manual_tile, manual_blur
+    
+    manual_sens = cv2.getTrackbarPos('Sensibilidad x100', 'Calibración Canny')
+    manual_clip = cv2.getTrackbarPos('CLAHE Clip x10', 'Calibración Canny')
+    manual_tile = max(2, cv2.getTrackbarPos('CLAHE Tile', 'Calibración Canny'))
+    manual_blur = cv2.getTrackbarPos('Blur Kernel', 'Calibración Canny')
+    
+    # Asegurar que blur_kernel sea impar
+    if manual_blur % 2 == 0:
+        manual_blur += 1
+    manual_blur = max(1, manual_blur)
+    
+    sens = manual_sens / 100.0
+    clip = manual_clip / 10.0
+    tile = manual_tile
+    blur = manual_blur
+    
+    return sens, blur, clip, tile
+
+
 def calculate_brightness(frame):
     return float(np.mean(frame))
 
@@ -68,15 +117,15 @@ def adjust_canny_params(brightness):
     - Claro (170-255): Menos sensibilidad, más blur
     """
     if brightness < 80:  # Escena oscura
-        sens = 0.40  # Más sensible para detectar bordes débiles
-        blur = 7     # Menos blur para preservar detalles
-        clip = 5.0   # CLAHE muy alto para compensar oscuridad
-        tile = 2     # Muy local
+        sens = 0.33  # test 1: 0.33
+        blur = 19     # test 1: 19 
+        clip = 4.0   # test 1: 4 
+        tile = 8     # test 1: 8
     elif brightness < 170:  # Escena con iluminación media
-        sens = 0.5
-        blur = 17
-        clip = 3
-        tile = 8
+        sens = 0.5  #test 2: 0.5
+        blur = 23   # test 2: 23
+        clip = 3    # test 2: 3
+        tile = 4    # test 2: 4
     else:  # Escena muy iluminada
         sens = 0.25  # Menos sensible (evita ruido/texturas)
         blur = 1     # Más blur para suavizar
@@ -179,6 +228,7 @@ def update_static_contours(closed_contours, static_contours, frame_idx):
 
 
 def main():
+    global calibration_mode
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
@@ -225,7 +275,10 @@ def main():
 
         # NUEVO: Calcular brillo y ajustar parámetros automáticamente
         brightness = calculate_brightness(frame)
-        adaptive_sens, adaptive_blur, adaptive_clip, adaptive_tile = adjust_canny_params(brightness)
+        if calibration_mode:
+            adaptive_sens, adaptive_blur, adaptive_clip, adaptive_tile = get_calibration_params()
+        else:
+            adaptive_sens, adaptive_blur, adaptive_clip, adaptive_tile = adjust_canny_params(brightness)
 
         # 1) Detección de movimiento global
         diff = cv2.absdiff(frame_gray, prev_gray)
@@ -307,6 +360,9 @@ def main():
         frame_count += 1
         processed_motion = frame.copy()
 
+
+        mask_tracks_motion = cv2.addWeighted(mask_tracks_motion, 0.95, mask_tracks_motion, 0, 0)
+        
         need_new_features_motion = False
         if p0_motion is None:
             need_new_features_motion = True
@@ -364,6 +420,8 @@ def main():
         # 4) Trackeo usando Canny mejorado (solo bordes en movimiento)
         processed_canny = cv2.cvtColor(edges_moving, cv2.COLOR_GRAY2BGR)
 
+
+        mask_tracks_canny = cv2.addWeighted(mask_tracks_canny, 0.95, mask_tracks_canny, 0, 0)
         need_new_features_canny = False
         if p0_canny is None:
             need_new_features_canny = True
@@ -480,6 +538,15 @@ def main():
             mask_tracks_canny = np.zeros_like(frame)
             p0_motion = None
             p0_canny = None
+        elif key == ord('w'):
+            # NUEVO: Alternar modo calibración
+            calibration_mode = not calibration_mode
+            if calibration_mode:
+                create_calibration_window()
+                print("Modo calibración ACTIVADO")
+            else:
+                cv2.destroyWindow('Calibración Canny')
+                print("Modo calibración DESACTIVADO (modo automático)")
 
     cap.release()
     cv2.destroyAllWindows()
