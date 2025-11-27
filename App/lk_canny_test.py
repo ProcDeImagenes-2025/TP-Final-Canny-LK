@@ -61,6 +61,69 @@ manual_clip = int(CLAHE_CLIP_LIMIT * 10)  # 0-100 (dividir por 10)
 manual_tile = CLAHE_TILE_SIZE  # 2-16
 manual_blur = BLUR_KERNEL  # 1-31 (impares)
 
+
+def get_dynamic_bounding_box(dynamic_contours):
+    """
+    Crea una bounding box que engloba TODOS los contornos dinámicos
+    Retorna: (x_min, y_min, x_max, y_max) o None si no hay contornos
+    """
+    if len(dynamic_contours) == 0:
+        return None
+    
+    x_min = float('inf')
+    y_min = float('inf')
+    x_max = 0
+    y_max = 0
+    
+    for cnt in dynamic_contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        x_min = min(x_min, x)
+        y_min = min(y_min, y)
+        x_max = max(x_max, x + w)
+        y_max = max(y_max, y + h)
+    
+    return (int(x_min), int(y_min), int(x_max), int(y_max))
+
+
+def filter_points_by_bbox(points, bbox, margin=10):
+    """
+    Filtra puntos que están dentro de la bounding box (con margen opcional)
+    
+    Args:
+        points: array de puntos (N, 1, 2)
+        bbox: (x_min, y_min, x_max, y_max)
+        margin: píxeles extra alrededor de la bbox
+    
+    Returns:
+        array de índices válidos
+    """
+    if points is None or len(points) == 0:
+        return np.array([], dtype=bool)
+    
+    # Si no hay bbox, marcar todos los puntos como inválidos
+    if bbox is None:
+        return np.zeros(len(points), dtype=bool)
+    
+    x_min, y_min, x_max, y_max = bbox
+    
+    # Expandir bbox con margen
+    x_min -= margin
+    y_min -= margin
+    x_max += margin
+    y_max += margin
+    
+    points_flat = points.reshape(-1, 2)
+    
+    valid = (
+        (points_flat[:, 0] >= x_min) &
+        (points_flat[:, 0] <= x_max) &
+        (points_flat[:, 1] >= y_min) &
+        (points_flat[:, 1] <= y_max)
+    )
+    
+    return valid
+
+
 def nothing(x):
     """Callback vacío para los trackbars"""
     pass
@@ -350,6 +413,7 @@ def main():
         #    de esos contornos dinámicos
         contours_only = cv2.bitwise_and(edges_moving, dynamic_mask)
 
+        dynamic_bbox = get_dynamic_bounding_box(dynamic_contours)
 
         # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO (no estáticos)
         # contours_only = np.zeros_like(frame_gray)
@@ -387,7 +451,8 @@ def main():
                 p1_flat = p1.reshape(-1, 2)
 
                 displacements = np.linalg.norm(p1_flat - p0_flat, axis=1)
-                valid = (st == 1) & (displacements < MAX_DISPLACEMENT)
+                inside_bbox = filter_points_by_bbox(p1, dynamic_bbox, margin=20)
+                valid = (st == 1) & (displacements < MAX_DISPLACEMENT) & inside_bbox
 
                 good_new = p1_flat[valid]
                 good_old = p0_flat[valid]
@@ -446,7 +511,8 @@ def main():
                 p1c_flat = p1c.reshape(-1, 2)
 
                 disp_c = np.linalg.norm(p1c_flat - p0c_flat, axis=1)
-                valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT)
+                inside_bbox_c = filter_points_by_bbox(p1c, dynamic_bbox, margin=20)
+                valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT) & inside_bbox_c
 
                 good_new_c = p1c_flat[valid_c]
                 good_old_c = p0c_flat[valid_c]
@@ -485,6 +551,12 @@ def main():
         #############   MOSTRAR CANTIDAD DE CONTRORNOS CERRADOS DETECTADOS  #############
         # Dibujar opcionalmente los contornos cerrados
         cv2.drawContours(edges_bgr, dynamic_contours, -1, (0, 255, 0), 2)
+
+
+        if dynamic_bbox is not None:
+            x_min, y_min, x_max, y_max = dynamic_bbox
+            cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+            cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
 
 
         # Mostrar la cantidad de contornos cerrados EN MOVIMIENTO
