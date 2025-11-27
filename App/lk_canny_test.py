@@ -20,7 +20,7 @@ feature_params = dict(
 
 # Parámetros de detección de movimiento
 MOTION_THRESH = 15
-MIN_FEATURES = 200
+MIN_FEATURES = 10
 DILATE_ITER = 4
 
 # Filtro de outliers de movimiento
@@ -310,7 +310,7 @@ def main():
         need_new_features_motion = False
         if p0_motion is None:
             need_new_features_motion = True
-        elif len(p0_motion) < MIN_FEATURES and frame_count % 10 == 0:
+        elif len(p0_motion) < MIN_FEATURES and frame_count % 30 == 0:
             need_new_features_motion = True
 
         if need_new_features_motion:
