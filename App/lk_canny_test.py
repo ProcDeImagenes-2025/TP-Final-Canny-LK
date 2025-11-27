@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import time
 
 # ---------------------------
 # Parámetros Lucas-Kanade
@@ -243,10 +244,10 @@ def adjust_canny_params(brightness):
         clip = 3    # test 2: 3
         tile = 4    # test 2: 4
     else:  # Escena muy iluminada
-        sens = 0.25  # Menos sensible (evita ruido/texturas)
-        blur = 1     # Más blur para suavizar
-        clip = 1.5   # CLAHE bajo (ya hay buen contraste)
-        tile = 8     # Más global
+        sens = 0.39  # test 3: 0.39
+        blur = 17     # test 3: 17
+        clip = 2   # test 3: 2
+        tile = 12     # test 3: 12
     
     return sens, blur, clip, tile
 
@@ -379,6 +380,8 @@ def main():
     # Cada elemento: {"cx", "cy", "w", "h", "life", "last_seen"}
     static_contours = []
 
+    last_reset_time = time.time()
+    RESET_INTERVAL = 10.0  # segundos
 
     while True:
         ret, frame = cap.read()
@@ -390,6 +393,19 @@ def main():
         frame = cv2.flip(frame, 1)
 
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        current_time = time.time()
+        if current_time - last_reset_time >= RESET_INTERVAL:
+            # Resetear puntos y máscaras
+            mask_tracks_motion = np.zeros_like(frame)
+            mask_tracks_canny = np.zeros_like(frame)
+            p0_motion = None
+            p0_canny = None
+            movement_history_canny = None
+            movement_history_motion = None
+            last_reset_time = current_time
+            print("Puntos reseteados automáticamente")
+
 
         # NUEVO: Calcular brillo y ajustar parámetros automáticamente
         brightness = calculate_brightness(frame)
