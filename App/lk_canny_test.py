@@ -23,8 +23,12 @@ MOTION_THRESH = 15
 MIN_FEATURES = 10
 DILATE_ITER = 4
 
+
 # Filtro de outliers de movimiento
 MAX_DISPLACEMENT = 1000.0  # píxeles
+
+# NUEVO: Umbral para considerar que un punto "se movió alguna vez"
+MIN_MOVEMENT_HISTORY = 5.0  # píxeles acumulados
 
 # Umbral para considerar que un borde está "quieto"
 STATIC_EDGE_THRESHOLD = 3   # Si el borde no cambia más de 5 píxeles, se ignora
@@ -314,11 +318,13 @@ def main():
     # Trackeo basado en movimiento
     p0_motion = None
     mask_tracks_motion = np.zeros_like(first_frame)
+    movement_history_motion = None
 
     # Trackeo basado en Canny
     p0_canny = None
     mask_tracks_canny = np.zeros_like(first_frame)
-
+    movement_history_canny = None
+    
     frame_count = 0
     # Contornos que consideramos parte del fondo (estáticos)
     # Cada elemento: {"cx", "cy", "w", "h", "life", "last_seen"}
@@ -439,6 +445,9 @@ def main():
                 mask=motion_mask,
                 **feature_params
             )
+            if p0_motion is not None:
+                movement_history_motion = np.zeros(len(p0_motion), dtype=np.float32)
+                
 
         if p0_motion is not None:
             p1, st, err = cv2.calcOpticalFlowPyrLK(
@@ -451,8 +460,16 @@ def main():
                 p1_flat = p1.reshape(-1, 2)
 
                 displacements = np.linalg.norm(p1_flat - p0_flat, axis=1)
+                
+                movement_history_motion += displacements
+                 
                 inside_bbox = filter_points_by_bbox(p1, dynamic_bbox, margin=20)
-                valid = (st == 1) & (displacements < MAX_DISPLACEMENT) & inside_bbox
+                # NUEVO: Un punto sobrevive si:
+                # 1. Status válido (st == 1)
+                # 2. Desplazamiento razonable (< MAX_DISPLACEMENT)
+                # 3. Está dentro de bbox O ya se movió antes (tiene historial)
+                has_moved_before = movement_history_motion >= MIN_MOVEMENT_HISTORY
+                valid = (st == 1) & (displacements < MAX_DISPLACEMENT) & (inside_bbox | has_moved_before)
 
                 good_new = p1_flat[valid]
                 good_old = p0_flat[valid]
@@ -475,10 +492,13 @@ def main():
                         )
 
                     p0_motion = good_new.reshape(-1, 1, 2)
+                    movement_history_motion = movement_history_motion[valid]
                 else:
                     p0_motion = None
+                    movement_history_motion = None
             else:
                 p0_motion = None
+                movement_history_motion = None
 
         processed_motion = cv2.add(processed_motion, mask_tracks_motion)
 
@@ -499,6 +519,8 @@ def main():
                 mask=edges_moving,  # Solo detectar en bordes que se mueven
                 **feature_params
             )
+            if p0_canny is not None:
+                movement_history_canny = np.zeros(len(p0_canny), dtype=np.float32)
 
         if p0_canny is not None:
             p1c, stc, errc = cv2.calcOpticalFlowPyrLK(
@@ -511,8 +533,13 @@ def main():
                 p1c_flat = p1c.reshape(-1, 2)
 
                 disp_c = np.linalg.norm(p1c_flat - p0c_flat, axis=1)
+                
+                movement_history_canny += disp_c
+                
                 inside_bbox_c = filter_points_by_bbox(p1c, dynamic_bbox, margin=20)
-                valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT) & inside_bbox_c
+                
+                has_moved_before_c = movement_history_canny >= MIN_MOVEMENT_HISTORY
+                valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT) & (inside_bbox_c | has_moved_before_c)
 
                 good_new_c = p1c_flat[valid_c]
                 good_old_c = p0c_flat[valid_c]
@@ -535,10 +562,13 @@ def main():
                         )
 
                     p0_canny = good_new_c.reshape(-1, 1, 2)
+                    movement_history_canny = movement_history_canny[valid_c]
                 else:
                     p0_canny = None
+                    movement_history_canny = None
             else:
                 p0_canny = None
+                movement_history_canny = None
 
         processed_canny = cv2.add(processed_canny, mask_tracks_canny)
 
@@ -610,6 +640,8 @@ def main():
             mask_tracks_canny = np.zeros_like(frame)
             p0_motion = None
             p0_canny = None
+            movement_history_canny = None
+            movement_history_motion = None
         elif key == ord('w'):
             # NUEVO: Alternar modo calibración
             calibration_mode = not calibration_mode
