@@ -42,6 +42,8 @@ Relacionado al algoritmo de `Canny`:
 - La necesidad de considerar la diferencia entre frames consecutivos para evitar efectos de motion blur.
 
     ![Canny_Diff](readme_images/motion_blur.png)
+    ![Canny_Diff2](readme_images/motion_blur_corregido.png)
+
 
 - La utilidad de la dilatación para mejorar la detección de bordes en presencia de ruido.
 
