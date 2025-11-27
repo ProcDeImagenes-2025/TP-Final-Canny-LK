@@ -17,7 +17,7 @@ La idea principal es detectar features en el primer frame para hacer el trackeo 
 -  Selección de Input de video o cámara. Optamos por la selección de la cámara por defecto (0).
 - Captura de frame y conversión a escala de grises.
 - Obtención del brillo del frame estimando con el valor medio de los pixeles.
-- Ajuste de los parámetros de Canny y Shi-Tomasi en función del brillo.
+- Ajuste de los parámetros de Canny en función del brillo.
 - Detección de bordes utilizando el algoritmo de Canny.
     - Obtención de la diferencia entre frames consecutivos para subsanar efectos de motion blur.
     - Dilatación de la imagen de bordes para mejorar la detección.
