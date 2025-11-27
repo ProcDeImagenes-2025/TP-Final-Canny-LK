@@ -3,7 +3,7 @@
 # Trabajo final de la materia Procesamiento de Imágenes - ITBA
 ## Integrantes:
 - Hertter, José Iván - 62499
-- Oms, Mariano Alejandro - 
+- Oms, Mariano Alejandro - 62080
 
 ## Descripción
 Implementación de un sistema de seguimiento de objetos en video utilizando los algoritmos de detección de bordes de Canny y el método de Lucas-Kanade para el seguimiento de puntos característicos.
