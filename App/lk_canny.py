@@ -3,6 +3,14 @@ import numpy as np
 import time
 import os
 import urllib.request
+import threading
+from utils.frameGrabber import FrameGrabber
+
+# ---------------------------
+# Configuración de Pantalla
+# ---------------------------
+TARGET_W = 1000
+TARGET_H = 600
 
 # ---------------------------
 # Configuración Red Neuronal
@@ -527,17 +535,24 @@ def main():
     else:
         print("ADVERTENCIA: No se encontraron los archivos del modelo DNN.")
 
-    cap = cv2.VideoCapture(0)
+    #cap = cv2.VideoCapture("rtsp://admin:12345678Ab@192.168.1.11:554/1/1?transport=tcp")
+    src = "rtsp://admin:12345678Ab@192.168.1.11:554/1/1?transport=tcp"
 
-    if not cap.isOpened():
-        print("No se pudo abrir la cámara.")
-        return
+    grabber = FrameGrabber(src).start()
 
-    # Primer frame
-    ret, first_frame = cap.read()
-    if not ret:
+    #Primer frame
+    ret, first_frame = grabber.read()
+    forceExit = False
+    timeout = 100
+    while not ret and not forceExit:
+        ret, first_frame = grabber.read()
+        time.sleep(0.01)
+        timeout -= 1
+        if timeout == 0:
+            forceExit = True
+    if forceExit:
         print("No se pudo leer el primer frame.")
-        cap.release()
+        grabber.stop()
         return
 
     # Espejar para que refleje movimientos naturales
@@ -565,472 +580,483 @@ def main():
     RESET_INTERVAL = 10.0  # segundos
     
     last_detected_objects = [] # Para guardar detecciones entre frames
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("No se pudo leer un frame.")
-            break
-
-        # Espejar
-        frame = cv2.flip(frame, 1)
-
-        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        current_time = time.time()
-        if current_time - last_reset_time >= RESET_INTERVAL:
-            # Resetear puntos y máscaras
-            mask_tracks_motion = np.zeros_like(frame)
-            mask_tracks_canny = np.zeros_like(frame)
-            p0_motion = None
-            p0_canny = None
-            movement_history_canny = None
-            movement_history_motion = None
-            last_reset_time = current_time
-            print("Puntos reseteados automáticamente")
-
-
-        # NUEVO: Calcular brillo y ajustar parámetros automáticamente
-        brightness = calculate_brightness(frame)
-        if calibration_mode:
-            adaptive_sens, adaptive_blur, adaptive_clip, adaptive_tile = get_calibration_params()
-        else:
-            adaptive_sens, adaptive_blur, adaptive_clip, adaptive_tile = adjust_canny_params(brightness)
-
-        # 1) Detección de movimiento global
-        diff = cv2.absdiff(frame_gray, prev_gray)
-        _, motion_mask = cv2.threshold(diff, MOTION_THRESH, 255, cv2.THRESH_BINARY)
-        motion_mask = cv2.dilate(motion_mask, None, iterations=DILATE_ITER)
-
-        # 1.1) Bordes "rápidos" usando solo la diferencia temporal
-        blur_diff = cv2.GaussianBlur(diff, (3, 3), 0)
-        # Umbral medio-alto para quedarnos sólo con cambios fuertes
-        _, edges_diff = cv2.threshold(blur_diff, 25, 255, cv2.THRESH_BINARY)
-        edges_diff = cv2.bitwise_and(edges_diff, motion_mask)
-
-
-        # 2) Canny MEJORADO con parámetros adaptativos
-        edges = canny_mejorado(
-            frame_gray,
-            sens=adaptive_sens,
-            clip_limit=adaptive_clip,
-            tile_size=adaptive_tile,
-            blur_kernel=adaptive_blur
-        )
-
-        # 2.1) Combinar bordes espaciales + bordes temporales
-        edges = cv2.bitwise_or(edges, edges_diff)
-
-        # 2.2) ELIMINAR BORDES ESTÁTICOS
-        if prev_edges is not None:
-            # Diferencia entre bordes actuales y anteriores
-            edge_diff = cv2.absdiff(edges, prev_edges)
-            
-            # Solo mantener bordes que cambiaron
-            _, moving_edges_mask = cv2.threshold(edge_diff, STATIC_EDGE_THRESHOLD, 255, cv2.THRESH_BINARY)
-            
-            # Combinar: bordes actuales AND bordes que se movieron
-            edges_moving = cv2.bitwise_and(edges, moving_edges_mask)
-        else:
-            edges_moving = edges.copy()
-        
-        # Actualizar bordes previos
-        prev_edges = edges.copy()
-
-        kernel = np.ones((3, 3), np.uint8)
-        edges_thick = cv2.dilate(edges_moving, kernel, iterations=1)
-
-        # 2.2) Contar contornos cerrados solo en bordes en movimiento
-        edges_closed = cv2.morphologyEx(edges_moving, cv2.MORPH_CLOSE, kernel, iterations=1)
-        contours, _ = cv2.findContours(edges_closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-        closed_contours = []
-        for cnt in contours:
-            # descartar contornos muy chicos (ruido)
-            if cv2.contourArea(cnt) < MIN_CONTOUR_AREA:
+    try:
+        while True:
+            ret, frame = grabber.read()
+            if not ret:
+                time.sleep(0.01)
+                print("No se pudo leer un frame.")
                 continue
-            closed_contours.append(cnt)
 
-        # Filtrar contornos que son "estáticos" (aparecen siempre en el mismo lugar)
-        dynamic_contours = update_static_contours(
-            closed_contours, static_contours, frame_count
-        )
+            # Espejar
+            frame = cv2.flip(frame, 1)
 
-        num_closed = len(dynamic_contours)
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # --- Bordes tipo Canny que sobreviven al filtro de "estático" ---
-        # 1) Máscara con las zonas de contornos dinámicos
-        dynamic_mask = np.zeros_like(edges_moving)
-        cv2.drawContours(dynamic_mask, dynamic_contours, -1, 255, thickness=1)
-
-        # 2) Nos quedamos sólo con los bordes en movimiento que caen dentro
-        #    de esos contornos dinámicos
-        contours_only = cv2.bitwise_and(edges_moving, dynamic_mask)
-
-        dynamic_bboxes = get_dynamic_bounding_boxes(dynamic_contours)
-
-        # --- FUSIONAR RECTÁNGULOS ---
-        # Unir rectángulos cercanos para tener un bounding box más grande y estable
-        merged_bboxes = merge_rectangles(dynamic_bboxes, threshold=50)
-        dynamic_bboxes = merged_bboxes  # Usamos los fusionados para el resto del pipeline
-
-        # --- DETECCIÓN DE OBJETOS (DNN) ---
-        if net is not None and frame_count % 5 == 0:
-            current_detections = []
-            h, w = frame.shape[:2]
-            # Preprocesamiento para MobileNet-SSD
-            blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843, (300, 300), 127.5)
-            net.setInput(blob)
-            detections = net.forward()
-
-            for i in range(detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
-                if confidence > DNN_CONFIDENCE:
-                    idx = int(detections[0, 0, i, 1])
-                    label = DNN_CLASSES[idx]
-                    
-                    # Coordenadas
-                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                    (startX, startY, endX, endY) = box.astype("int")
-                    det_bbox = (startX, startY, endX, endY)
-                    
-                    # Verificar intersección con movimiento
-                    is_moving = False
-                    for m_bbox in dynamic_bboxes:
-                        if check_intersection(det_bbox, m_bbox):
-                            is_moving = True
-                            break
-                    
-                    if is_moving:
-                        current_detections.append((label, confidence, det_bbox))
-            
-            last_detected_objects = current_detections
+            current_time = time.time()
+            if current_time - last_reset_time >= RESET_INTERVAL:
+                # Resetear puntos y máscaras
+                mask_tracks_motion = np.zeros_like(frame)
+                mask_tracks_canny = np.zeros_like(frame)
+                p0_motion = None
+                p0_canny = None
+                movement_history_canny = None
+                movement_history_motion = None
+                last_reset_time = current_time
+                print("Puntos reseteados automáticamente")
 
 
-        # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO (no estáticos)
-        # contours_only = np.zeros_like(frame_gray)
-        # cv2.drawContours(contours_only, dynamic_contours, -1, (255), 2)
-        # contours_only = edges_moving.copy()
+            # NUEVO: Calcular brillo y ajustar parámetros automáticamente
+            brightness = calculate_brightness(frame)
+            if calibration_mode:
+                adaptive_sens, adaptive_blur, adaptive_clip, adaptive_tile = get_calibration_params()
+            else:
+                adaptive_sens, adaptive_blur, adaptive_clip, adaptive_tile = adjust_canny_params(brightness)
 
-        # 3) Trackeo usando movimiento
-        frame_count += 1
-        processed_motion = frame.copy()
+            # 1) Detección de movimiento global
+            diff = cv2.absdiff(frame_gray, prev_gray)
+            _, motion_mask = cv2.threshold(diff, MOTION_THRESH, 255, cv2.THRESH_BINARY)
+            motion_mask = cv2.dilate(motion_mask, None, iterations=DILATE_ITER)
+
+            # 1.1) Bordes "rápidos" usando solo la diferencia temporal
+            blur_diff = cv2.GaussianBlur(diff, (3, 3), 0)
+            # Umbral medio-alto para quedarnos sólo con cambios fuertes
+            _, edges_diff = cv2.threshold(blur_diff, 25, 255, cv2.THRESH_BINARY)
+            edges_diff = cv2.bitwise_and(edges_diff, motion_mask)
 
 
-        mask_tracks_motion = cv2.addWeighted(mask_tracks_motion, 0.95, mask_tracks_motion, 0, 0)
-        
-        need_new_features_motion = False
-        if p0_motion is None:
-            need_new_features_motion = True
-        elif len(p0_motion) < MIN_FEATURES and frame_count % 30 == 0:
-            need_new_features_motion = True
-
-        if need_new_features_motion:
-            p0_motion = cv2.goodFeaturesToTrack(
-                prev_gray,
-                mask=motion_mask,
-                **feature_params
+            # 2) Canny MEJORADO con parámetros adaptativos
+            edges = canny_mejorado(
+                frame_gray,
+                sens=adaptive_sens,
+                clip_limit=adaptive_clip,
+                tile_size=adaptive_tile,
+                blur_kernel=adaptive_blur
             )
-            if p0_motion is not None:
-                movement_history_motion = np.zeros(len(p0_motion), dtype=np.float32)
+
+            # 2.1) Combinar bordes espaciales + bordes temporales
+            edges = cv2.bitwise_or(edges, edges_diff)
+
+            # 2.2) ELIMINAR BORDES ESTÁTICOS
+            if prev_edges is not None:
+                # Diferencia entre bordes actuales y anteriores
+                edge_diff = cv2.absdiff(edges, prev_edges)
                 
+                # Solo mantener bordes que cambiaron
+                _, moving_edges_mask = cv2.threshold(edge_diff, STATIC_EDGE_THRESHOLD, 255, cv2.THRESH_BINARY)
+                
+                # Combinar: bordes actuales AND bordes que se movieron
+                edges_moving = cv2.bitwise_and(edges, moving_edges_mask)
+            else:
+                edges_moving = edges.copy()
+            
+            # Actualizar bordes previos
+            prev_edges = edges.copy()
 
-        if p0_motion is not None:
-            p1, st, err = cv2.calcOpticalFlowPyrLK(
-                prev_gray, frame_gray, p0_motion, None, **lk_params
+            kernel = np.ones((3, 3), np.uint8)
+            edges_thick = cv2.dilate(edges_moving, kernel, iterations=1)
+
+            # 2.2) Contar contornos cerrados solo en bordes en movimiento
+            edges_closed = cv2.morphologyEx(edges_moving, cv2.MORPH_CLOSE, kernel, iterations=1)
+            contours, _ = cv2.findContours(edges_closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+            closed_contours = []
+            for cnt in contours:
+                # descartar contornos muy chicos (ruido)
+                if cv2.contourArea(cnt) < MIN_CONTOUR_AREA:
+                    continue
+                closed_contours.append(cnt)
+
+            # Filtrar contornos que son "estáticos" (aparecen siempre en el mismo lugar)
+            dynamic_contours = update_static_contours(
+                closed_contours, static_contours, frame_count
             )
 
-            if p1 is not None:
-                st = st.reshape(-1)
-                p0_flat = p0_motion.reshape(-1, 2)
-                p1_flat = p1.reshape(-1, 2)
+            num_closed = len(dynamic_contours)
 
-                displacements = np.linalg.norm(p1_flat - p0_flat, axis=1)
+            # --- Bordes tipo Canny que sobreviven al filtro de "estático" ---
+            # 1) Máscara con las zonas de contornos dinámicos
+            dynamic_mask = np.zeros_like(edges_moving)
+            cv2.drawContours(dynamic_mask, dynamic_contours, -1, 255, thickness=1)
 
-                # Asegurar que movement_history_motion tenga el mismo tamaño que displacements
-                if movement_history_motion is None or movement_history_motion.shape[0] != displacements.shape[0]:
-                    movement_history_motion = np.zeros_like(displacements)
+            # 2) Nos quedamos sólo con los bordes en movimiento que caen dentro
+            #    de esos contornos dinámicos
+            contours_only = cv2.bitwise_and(edges_moving, dynamic_mask)
 
-                movement_history_motion += displacements
+            dynamic_bboxes = get_dynamic_bounding_boxes(dynamic_contours)
 
-                 
-                # inside_bbox = filter_points_by_bbox(p1, dynamic_bbox, margin=20)
-                inside_bbox = filter_points_by_bboxes(p1, dynamic_bboxes, margin=20)
+            # --- FUSIONAR RECTÁNGULOS ---
+            # Unir rectángulos cercanos para tener un bounding box más grande y estable
+            merged_bboxes = merge_rectangles(dynamic_bboxes, threshold=50)
+            dynamic_bboxes = merged_bboxes  # Usamos los fusionados para el resto del pipeline
 
-                # NUEVO: Un punto sobrevive si:
-                # 1. Status válido (st == 1)
-                # 2. Desplazamiento razonable (< MAX_DISPLACEMENT)
-                # 3. Está dentro de bbox O ya se movió antes (tiene historial)
-                has_moved_before = movement_history_motion >= MIN_MOVEMENT_HISTORY
-                # valid = (st == 1) & (displacements < MAX_DISPLACEMENT) & (inside_bbox | has_moved_before)
-                valid = (st == 1) & (displacements < MAX_DISPLACEMENT) & (inside_bbox | has_moved_before)
+            # --- DETECCIÓN DE OBJETOS (DNN) ---
+            if net is not None and frame_count % 5 == 0:
+                current_detections = []
+                h, w = frame.shape[:2]
+                # Preprocesamiento para MobileNet-SSD
+                blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843, (300, 300), 127.5)
+                net.setInput(blob)
+                detections = net.forward()
+
+                for i in range(detections.shape[2]):
+                    confidence = detections[0, 0, i, 2]
+                    if confidence > DNN_CONFIDENCE:
+                        idx = int(detections[0, 0, i, 1])
+                        label = DNN_CLASSES[idx]
+                        
+                        # Coordenadas
+                        box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                        (startX, startY, endX, endY) = box.astype("int")
+                        det_bbox = (startX, startY, endX, endY)
+                        
+                        # Verificar intersección con movimiento
+                        is_moving = False
+                        for m_bbox in dynamic_bboxes:
+                            if check_intersection(det_bbox, m_bbox):
+                                is_moving = True
+                                break
+                        
+                        if is_moving:
+                            current_detections.append((label, confidence, det_bbox))
+                
+                last_detected_objects = current_detections
 
 
-                good_new = p1_flat[valid]
-                good_old = p0_flat[valid]
+            # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO (no estáticos)
+            # contours_only = np.zeros_like(frame_gray)
+            # cv2.drawContours(contours_only, dynamic_contours, -1, (255), 2)
+            # contours_only = edges_moving.copy()
 
-                if len(good_new) > 0:
-                    for (new, old) in zip(good_new, good_old):
-                        a, b = new.ravel()
-                        c, d = old.ravel()
-                        mask_tracks_motion = cv2.line(
-                            mask_tracks_motion,
-                            (int(a), int(b)), (int(c), int(d)),
-                            (0, 255, 0), 2
-                        )
-                        processed_motion = cv2.circle(
-                            processed_motion,
-                            (int(a), int(b)),
-                            4,
-                            (0, 0, 255),
-                            -1
-                        )
+            # 3) Trackeo usando movimiento
+            frame_count += 1
+            processed_motion = frame.copy()
 
-                    p0_motion = good_new.reshape(-1, 1, 2)
-                    movement_history_motion = movement_history_motion[valid]
+
+            mask_tracks_motion = cv2.addWeighted(mask_tracks_motion, 0.95, mask_tracks_motion, 0, 0)
+            
+            need_new_features_motion = False
+            if p0_motion is None:
+                need_new_features_motion = True
+            elif len(p0_motion) < MIN_FEATURES and frame_count % 30 == 0:
+                need_new_features_motion = True
+
+            if need_new_features_motion:
+                p0_motion = cv2.goodFeaturesToTrack(
+                    prev_gray,
+                    mask=motion_mask,
+                    **feature_params
+                )
+                if p0_motion is not None:
+                    movement_history_motion = np.zeros(len(p0_motion), dtype=np.float32)
+                    
+
+            if p0_motion is not None:
+                p1, st, err = cv2.calcOpticalFlowPyrLK(
+                    prev_gray, frame_gray, p0_motion, None, **lk_params
+                )
+
+                if p1 is not None:
+                    st = st.reshape(-1)
+                    p0_flat = p0_motion.reshape(-1, 2)
+                    p1_flat = p1.reshape(-1, 2)
+
+                    displacements = np.linalg.norm(p1_flat - p0_flat, axis=1)
+
+                    # Asegurar que movement_history_motion tenga el mismo tamaño que displacements
+                    if movement_history_motion is None or movement_history_motion.shape[0] != displacements.shape[0]:
+                        movement_history_motion = np.zeros_like(displacements)
+
+                    movement_history_motion += displacements
+
+                     
+                    # inside_bbox = filter_points_by_bbox(p1, dynamic_bbox, margin=20)
+                    inside_bbox = filter_points_by_bboxes(p1, dynamic_bboxes, margin=20)
+
+                    # NUEVO: Un punto sobrevive si:
+                    # 1. Status válido (st == 1)
+                    # 2. Desplazamiento razonable (< MAX_DISPLACEMENT)
+                    # 3. Está dentro de bbox O ya se movió antes (tiene historial)
+                    has_moved_before = movement_history_motion >= MIN_MOVEMENT_HISTORY
+                    # valid = (st == 1) & (displacements < MAX_DISPLACEMENT) & (inside_bbox | has_moved_before)
+                    valid = (st == 1) & (displacements < MAX_DISPLACEMENT) & (inside_bbox | has_moved_before)
+
+
+                    good_new = p1_flat[valid]
+                    good_old = p0_flat[valid]
+
+                    if len(good_new) > 0:
+                        for (new, old) in zip(good_new, good_old):
+                            a, b = new.ravel()
+                            c, d = old.ravel()
+                            mask_tracks_motion = cv2.line(
+                                mask_tracks_motion,
+                                (int(a), int(b)), (int(c), int(d)),
+                                (0, 255, 0), 2
+                            )
+                            processed_motion = cv2.circle(
+                                processed_motion,
+                                (int(a), int(b)),
+                                4,
+                                (0, 0, 255),
+                                -1
+                            )
+
+                        p0_motion = good_new.reshape(-1, 1, 2)
+                        movement_history_motion = movement_history_motion[valid]
+                    else:
+                        p0_motion = None
+                        movement_history_motion = None
                 else:
                     p0_motion = None
                     movement_history_motion = None
-            else:
-                p0_motion = None
-                movement_history_motion = None
 
-        processed_motion = cv2.add(processed_motion, mask_tracks_motion)
+            processed_motion = cv2.add(processed_motion, mask_tracks_motion)
 
-        # 4) Trackeo usando Canny mejorado (solo bordes en movimiento)
-        processed_canny = cv2.cvtColor(edges_moving, cv2.COLOR_GRAY2BGR)
+            # 4) Trackeo usando Canny mejorado (solo bordes en movimiento)
+            processed_canny = cv2.cvtColor(edges_moving, cv2.COLOR_GRAY2BGR)
 
 
-        mask_tracks_canny = cv2.addWeighted(mask_tracks_canny, 0.95, mask_tracks_canny, 0, 0)
-        need_new_features_canny = False
-        if p0_canny is None:
-            need_new_features_canny = True
-        elif len(p0_canny) < MIN_FEATURES and frame_count % 10 == 0:
-            need_new_features_canny = True
+            mask_tracks_canny = cv2.addWeighted(mask_tracks_canny, 0.95, mask_tracks_canny, 0, 0)
+            need_new_features_canny = False
+            if p0_canny is None:
+                need_new_features_canny = True
+            elif len(p0_canny) < MIN_FEATURES and frame_count % 10 == 0:
+                need_new_features_canny = True
 
-        if need_new_features_canny:
-            p0_canny = cv2.goodFeaturesToTrack(
-                prev_gray,
-                mask=edges_moving,  # Solo detectar en bordes que se mueven
-                **feature_params
-            )
+            if need_new_features_canny:
+                p0_canny = cv2.goodFeaturesToTrack(
+                    prev_gray,
+                    mask=edges_moving,  # Solo detectar en bordes que se mueven
+                    **feature_params
+                )
+                if p0_canny is not None:
+                    movement_history_canny = np.zeros(len(p0_canny), dtype=np.float32)
+
+                # ---------------------------------------------------------------------
+                # Agregar nuevos puntos en bboxes que no tienen ninguno (solo Canny)
+                # ---------------------------------------------------------------------
+                if (not need_new_features_canny) and (p0_canny is not None) and dynamic_bboxes:
+                    points_flat = p0_canny.reshape(-1, 2)
+
+                    for (x_min, y_min, x_max, y_max) in dynamic_bboxes:
+
+                        # Chequear si EXISTE al menos un punto dentro de esta bbox
+                        inside = (
+                            (points_flat[:, 0] >= x_min) &
+                            (points_flat[:, 0] <= x_max) &
+                            (points_flat[:, 1] >= y_min) &
+                            (points_flat[:, 1] <= y_max)
+                        )
+
+                        if not np.any(inside):
+                            # ---------------------------------------------------------
+                            # NO hay puntos en esta bbox → crear máscara y buscar nuevos
+                            # ---------------------------------------------------------
+                            roi_mask = np.zeros_like(edges_moving)
+                            cv2.rectangle(roi_mask, (x_min, y_min), (x_max, y_max), 255, -1)
+
+                            # Restringimos la ROI a bordes que se mueven
+                            roi_mask = cv2.bitwise_and(roi_mask, edges_moving)
+
+                            new_pts = cv2.goodFeaturesToTrack(
+                                prev_gray,
+                                mask=roi_mask,
+                                **feature_params
+                            )
+
+                            # Si encontramos nuevos puntos, los agregamos al conjunto actual
+                            if new_pts is not None and len(new_pts) > 0:
+                                if p0_canny is None:
+                                    p0_canny = new_pts
+                                    points_flat = p0_canny.reshape(-1, 2)
+                                else:
+                                    p0_canny = np.vstack([p0_canny, new_pts])
+                                    points_flat = p0_canny.reshape(-1, 2)
+
+
             if p0_canny is not None:
-                movement_history_canny = np.zeros(len(p0_canny), dtype=np.float32)
+                p1c, stc, errc = cv2.calcOpticalFlowPyrLK(
+                    prev_gray, frame_gray, p0_canny, None, **lk_params
+                )
 
-            # ---------------------------------------------------------------------
-            # Agregar nuevos puntos en bboxes que no tienen ninguno (solo Canny)
-            # ---------------------------------------------------------------------
-            if (not need_new_features_canny) and (p0_canny is not None) and dynamic_bboxes:
-                points_flat = p0_canny.reshape(-1, 2)
+                if p1c is not None:
+                    stc = stc.reshape(-1)
+                    p0c_flat = p0_canny.reshape(-1, 2)
+                    p1c_flat = p1c.reshape(-1, 2)
 
-                for (x_min, y_min, x_max, y_max) in dynamic_bboxes:
+                    disp_c = np.linalg.norm(p1c_flat - p0c_flat, axis=1)
 
-                    # Chequear si EXISTE al menos un punto dentro de esta bbox
-                    inside = (
-                        (points_flat[:, 0] >= x_min) &
-                        (points_flat[:, 0] <= x_max) &
-                        (points_flat[:, 1] >= y_min) &
-                        (points_flat[:, 1] <= y_max)
-                    )
+                    # Asegurar que movement_history_canny tenga el mismo tamaño que disp_c
+                    if movement_history_canny is None or movement_history_canny.shape[0] != disp_c.shape[0]:
+                        movement_history_canny = np.zeros_like(disp_c)
 
-                    if not np.any(inside):
-                        # ---------------------------------------------------------
-                        # NO hay puntos en esta bbox → crear máscara y buscar nuevos
-                        # ---------------------------------------------------------
-                        roi_mask = np.zeros_like(edges_moving)
-                        cv2.rectangle(roi_mask, (x_min, y_min), (x_max, y_max), 255, -1)
+                    movement_history_canny += disp_c
 
-                        # Restringimos la ROI a bordes que se mueven
-                        roi_mask = cv2.bitwise_and(roi_mask, edges_moving)
+                    
+                    # inside_bbox_c = filter_points_by_bbox(p1c, dynamic_bbox, margin=20)
+                    inside_bbox_c = filter_points_by_bboxes(p1c, dynamic_bboxes, margin=20)
 
-                        new_pts = cv2.goodFeaturesToTrack(
-                            prev_gray,
-                            mask=roi_mask,
-                            **feature_params
-                        )
-
-                        # Si encontramos nuevos puntos, los agregamos al conjunto actual
-                        if new_pts is not None and len(new_pts) > 0:
-                            if p0_canny is None:
-                                p0_canny = new_pts
-                                points_flat = p0_canny.reshape(-1, 2)
-                            else:
-                                p0_canny = np.vstack([p0_canny, new_pts])
-                                points_flat = p0_canny.reshape(-1, 2)
+                    has_moved_before_c = movement_history_canny >= MIN_MOVEMENT_HISTORY
+                    # valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT) & (inside_bbox_c | has_moved_before_c)
+                    valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT) & (inside_bbox_c | has_moved_before_c)
 
 
-        if p0_canny is not None:
-            p1c, stc, errc = cv2.calcOpticalFlowPyrLK(
-                prev_gray, frame_gray, p0_canny, None, **lk_params
-            )
+                    good_new_c = p1c_flat[valid_c]
+                    good_old_c = p0c_flat[valid_c]
 
-            if p1c is not None:
-                stc = stc.reshape(-1)
-                p0c_flat = p0_canny.reshape(-1, 2)
-                p1c_flat = p1c.reshape(-1, 2)
+                    if len(good_new_c) > 0:
+                        for (new, old) in zip(good_new_c, good_old_c):
+                            a, b = new.ravel()
+                            c, d = old.ravel()
+                            mask_tracks_canny = cv2.line(
+                                mask_tracks_canny,
+                                (int(a), int(b)), (int(c), int(d)),
+                                (255, 0, 255), 2
+                            )
+                            processed_canny = cv2.circle(
+                                processed_canny,
+                                (int(a), int(b)),
+                                4,
+                                (0, 255, 255),
+                                -1
+                            )
 
-                disp_c = np.linalg.norm(p1c_flat - p0c_flat, axis=1)
-
-                # Asegurar que movement_history_canny tenga el mismo tamaño que disp_c
-                if movement_history_canny is None or movement_history_canny.shape[0] != disp_c.shape[0]:
-                    movement_history_canny = np.zeros_like(disp_c)
-
-                movement_history_canny += disp_c
-
-                
-                # inside_bbox_c = filter_points_by_bbox(p1c, dynamic_bbox, margin=20)
-                inside_bbox_c = filter_points_by_bboxes(p1c, dynamic_bboxes, margin=20)
-
-                has_moved_before_c = movement_history_canny >= MIN_MOVEMENT_HISTORY
-                # valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT) & (inside_bbox_c | has_moved_before_c)
-                valid_c = (stc == 1) & (disp_c < MAX_DISPLACEMENT) & (inside_bbox_c | has_moved_before_c)
-
-
-                good_new_c = p1c_flat[valid_c]
-                good_old_c = p0c_flat[valid_c]
-
-                if len(good_new_c) > 0:
-                    for (new, old) in zip(good_new_c, good_old_c):
-                        a, b = new.ravel()
-                        c, d = old.ravel()
-                        mask_tracks_canny = cv2.line(
-                            mask_tracks_canny,
-                            (int(a), int(b)), (int(c), int(d)),
-                            (255, 0, 255), 2
-                        )
-                        processed_canny = cv2.circle(
-                            processed_canny,
-                            (int(a), int(b)),
-                            4,
-                            (0, 255, 255),
-                            -1
-                        )
-
-                    p0_canny = good_new_c.reshape(-1, 1, 2)
-                    movement_history_canny = movement_history_canny[valid_c]
+                        p0_canny = good_new_c.reshape(-1, 1, 2)
+                        movement_history_canny = movement_history_canny[valid_c]
+                    else:
+                        p0_canny = None
+                        movement_history_canny = None
                 else:
                     p0_canny = None
                     movement_history_canny = None
-            else:
-                p0_canny = None
-                movement_history_canny = None
 
-        processed_canny = cv2.add(processed_canny, mask_tracks_canny)
+            processed_canny = cv2.add(processed_canny, mask_tracks_canny)
 
-        # 5) Mostrar info de debug si está activado
-        if show_debug_info:
-            num_motion = len(p0_motion) if p0_motion is not None else 0
-            num_canny = len(p0_canny) if p0_canny is not None else 0
-            num_dynamic = len(dynamic_contours)
-            
-            processed_motion = draw_debug_info(
-                processed_motion, brightness, adaptive_sens, adaptive_blur,
-                adaptive_clip, adaptive_tile, num_motion, num_canny, num_dynamic
+            # 5) Mostrar info de debug si está activado
+            if show_debug_info:
+                num_motion = len(p0_motion) if p0_motion is not None else 0
+                num_canny = len(p0_canny) if p0_canny is not None else 0
+                num_dynamic = len(dynamic_contours)
+                
+                processed_motion = draw_debug_info(
+                    processed_motion, brightness, adaptive_sens, adaptive_blur,
+                    adaptive_clip, adaptive_tile, num_motion, num_canny, num_dynamic
+                )
+
+            # 6) Actualizar prev_gray y mostrar
+            prev_gray = frame_gray.copy()
+
+            # Pasar edges a BGR para poder apilarlo
+            edges_bgr = cv2.cvtColor(contours_only, cv2.COLOR_GRAY2BGR)
+
+            #############   MOSTRAR CANTIDAD DE CONTRORNOS CERRADOS DETECTADOS  #############
+            # Dibujar opcionalmente los contornos cerrados
+            cv2.drawContours(edges_bgr, dynamic_contours, -1, (0, 255, 0), 2)
+
+
+            # if dynamic_bbox is not None:
+            #     x_min, y_min, x_max, y_max = dynamic_bbox
+            #     cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+            #     cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+
+            if dynamic_bboxes:
+                for (x_min, y_min, x_max, y_max) in dynamic_bboxes:
+                    cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+                    # cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+
+            # Dibujar objetos detectados por DNN
+            for (label, conf, (startX, startY, endX, endY)) in last_detected_objects:
+                # Rectángulo verde para objetos reconocidos
+                cv2.rectangle(edges_bgr, (startX, startY), (endX, endY), (0, 255, 0), 2)
+                label_text = f"{label}: {conf:.2f}"
+                y = startY - 15 if startY - 15 > 15 else startY + 15
+                cv2.putText(edges_bgr, label_text, (startX, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+
+            # Mostrar la cantidad de contornos cerrados EN MOVIMIENTO
+            cv2.putText(
+                edges_bgr,
+                f"Contornos en movimiento: {num_closed}",
+                (10, 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA
             )
 
-        # 6) Actualizar prev_gray y mostrar
-        prev_gray = frame_gray.copy()
-
-        # Pasar edges a BGR para poder apilarlo
-        edges_bgr = cv2.cvtColor(contours_only, cv2.COLOR_GRAY2BGR)
-
-        #############   MOSTRAR CANTIDAD DE CONTRORNOS CERRADOS DETECTADOS  #############
-        # Dibujar opcionalmente los contornos cerrados
-        cv2.drawContours(edges_bgr, dynamic_contours, -1, (0, 255, 0), 2)
-
-
-        # if dynamic_bbox is not None:
-        #     x_min, y_min, x_max, y_max = dynamic_bbox
-        #     cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
-        #     cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
-
-        if dynamic_bboxes:
-            for (x_min, y_min, x_max, y_max) in dynamic_bboxes:
-                cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
-                # cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
-
-        # Dibujar objetos detectados por DNN
-        for (label, conf, (startX, startY, endX, endY)) in last_detected_objects:
-            # Rectángulo verde para objetos reconocidos
-            cv2.rectangle(edges_bgr, (startX, startY), (endX, endY), (0, 255, 0), 2)
-            label_text = f"{label}: {conf:.2f}"
-            y = startY - 15 if startY - 15 > 15 else startY + 15
-            cv2.putText(edges_bgr, label_text, (startX, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # Mostrar información de iluminación y parámetros adaptativos
+            cv2.putText(
+                edges_bgr,
+                f"Brillo: {int(brightness)} | Sens: {adaptive_sens:.2f} | Blur: {adaptive_blur}",
+                (10, 55),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 0),
+                1,
+                cv2.LINE_AA
+            )
 
 
-        # Mostrar la cantidad de contornos cerrados EN MOVIMIENTO
-        cv2.putText(
-            edges_bgr,
-            f"Contornos en movimiento: {num_closed}",
-            (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA
-        )
+            # # Asegurar mismo tamaño
+            # h, w = frame.shape[:2]
+            # processed_motion = cv2.resize(processed_motion, (w, h))
+            # edges_bgr = cv2.resize(edges_bgr, (w, h))
+            # processed_canny = cv2.resize(processed_canny, (w, h))
 
-        # Mostrar información de iluminación y parámetros adaptativos
-        cv2.putText(
-            edges_bgr,
-            f"Brillo: {int(brightness)} | Sens: {adaptive_sens:.2f} | Blur: {adaptive_blur}",
-            (10, 55),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 0),
-            1,
-            cv2.LINE_AA
-        )
+            top_row = np.hstack((frame, processed_motion))
+            bottom_row = np.hstack((edges_bgr, processed_canny))
+            combined = np.vstack((top_row, bottom_row))
+
+            # -----------------------
+            # AUTO-FIT A resolución deseada
+            # -----------------------
+            hC, wC = combined.shape[:2]
+
+            scale_w = TARGET_W / float(wC)
+            scale_h = TARGET_H / float(hC)
+            scale = min(scale_w, scale_h)  # mantiene aspect ratio y entra completo
+
+            new_w = max(1, int(wC * scale))
+            new_h = max(1, int(hC * scale))
+
+            combined_resized = cv2.resize(combined, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
-        # # Asegurar mismo tamaño
-        # h, w = frame.shape[:2]
-        # processed_motion = cv2.resize(processed_motion, (w, h))
-        # edges_bgr = cv2.resize(edges_bgr, (w, h))
-        # processed_canny = cv2.resize(processed_canny, (w, h))
+            cv2.imshow("Arriba: original | LK movimiento  |  Abajo: Canny MEJORADO | LK usando Canny", combined_resized)
 
-        top_row = np.hstack((frame, processed_motion))
-        bottom_row = np.hstack((edges_bgr, processed_canny))
-        combined = np.vstack((top_row, bottom_row))
-
-        # Redimensionar la ventana completa
-        display_h = int(combined.shape[0] * DISPLAY_SCALE)
-        display_w = int(combined.shape[1] * DISPLAY_SCALE)
-        combined_resized = cv2.resize(combined, (display_w, display_h))
-
-        cv2.imshow("Arriba: original | LK movimiento  |  Abajo: Canny MEJORADO | LK usando Canny", combined_resized)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord('e'):
-            # limpiar líneas y puntos acumulados
-            mask_tracks_motion = np.zeros_like(frame)
-            mask_tracks_canny = np.zeros_like(frame)
-            p0_motion = None
-            p0_canny = None
-            movement_history_canny = None
-            movement_history_motion = None
-        elif key == ord('w'):
-            # NUEVO: Alternar modo calibración
-            calibration_mode = not calibration_mode
-            if calibration_mode:
-                create_calibration_window()
-                print("Modo calibración ACTIVADO")
-            else:
-                cv2.destroyWindow('Calibración Canny')
-                print("Modo calibración DESACTIVADO (modo automático)")
-        elif key == ord('d'):
-            # NUEVO: Alternar visualización de debug
-            show_debug_info = not show_debug_info
-            if show_debug_info:
-                print("Debug info ACTIVADO")
-            else:
-                print("Debug info DESACTIVADO")
-
-    cap.release()
-    cv2.destroyAllWindows()
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+            elif key == ord('e'):
+                # limpiar líneas y puntos acumulados
+                mask_tracks_motion = np.zeros_like(frame)
+                mask_tracks_canny = np.zeros_like(frame)
+                p0_motion = None
+                p0_canny = None
+                movement_history_canny = None
+                movement_history_motion = None
+            elif key == ord('w'):
+                # NUEVO: Alternar modo calibración
+                calibration_mode = not calibration_mode
+                if calibration_mode:
+                    create_calibration_window()
+                    print("Modo calibración ACTIVADO")
+                else:
+                    cv2.destroyWindow('Calibración Canny')
+                    print("Modo calibración DESACTIVADO (modo automático)")
+            elif key == ord('d'):
+                # NUEVO: Alternar visualización de debug
+                show_debug_info = not show_debug_info
+                if show_debug_info:
+                    print("Debug info ACTIVADO")
+                else:
+                    print("Debug info DESACTIVADO")
+    finally:
+        grabber.stop()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
