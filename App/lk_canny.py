@@ -61,6 +61,7 @@ STATIC_FORGET_FRAMES = 60      # si no aparece en 60 frames, se descarta del fon
 #     return brightness
 
 calibration_mode = False
+show_debug_info = False
 manual_sens = int(CANNY_SENS * 100)  # 0-100
 manual_clip = int(CLAHE_CLIP_LIMIT * 10)  # 0-100 (dividir por 10)
 manual_tile = CLAHE_TILE_SIZE  # 2-16
@@ -199,6 +200,57 @@ def create_calibration_window():
     cv2.putText(info, 'Blur Kernel: 1-31 (impar)', (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
     cv2.imshow('Calibración Canny', info)
 
+def draw_debug_info(frame, brightness, sens, blur, clip, tile, num_points_motion, num_points_canny, num_contours):
+    """Dibuja información de debug en el frame"""
+    # Fondo semi-transparente para el texto
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (10, 10), (400, 280), (0, 0, 0), -1)
+    frame_with_info = cv2.addWeighted(frame, 0.7, overlay, 0.3, 0)
+    
+    y_offset = 35
+    line_height = 30
+    
+    # Título
+    cv2.putText(frame_with_info, "DEBUG INFO (tecla 'd' para ocultar)", 
+                (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+    y_offset += line_height
+    
+    # Parámetros Canny
+    cv2.putText(frame_with_info, f"Brillo: {brightness:.1f}", 
+                (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    y_offset += line_height
+    
+    cv2.putText(frame_with_info, f"Sensibilidad: {sens:.3f}", 
+                (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    y_offset += line_height
+    
+    cv2.putText(frame_with_info, f"Blur Kernel: {blur}", 
+                (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    y_offset += line_height
+    
+    cv2.putText(frame_with_info, f"CLAHE Clip: {clip:.1f}", 
+                (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    y_offset += line_height
+    
+    cv2.putText(frame_with_info, f"CLAHE Tile: {tile}", 
+                (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    y_offset += line_height
+    
+    # Tracking info
+    cv2.putText(frame_with_info, f"Puntos Motion: {num_points_motion}", 
+                (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    y_offset += line_height
+    
+    cv2.putText(frame_with_info, f"Puntos Canny: {num_points_canny}", 
+                (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+    y_offset += line_height
+    
+    cv2.putText(frame_with_info, f"Contornos dinamicos: {num_contours}", 
+                (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    
+    return frame_with_info
+
+
 def get_calibration_params():
     """Obtiene los valores actuales de los trackbars"""
     global manual_sens, manual_clip, manual_tile, manual_blur
@@ -226,28 +278,42 @@ def calculate_brightness(frame):
 
 def adjust_canny_params(brightness):
     """
-    Ajusta CANNY_SENS y BLUR_KERNEL según el nivel de iluminación
+    Ajusta parámetros Canny con ecuaciones continuas basadas en brillo (0-170)
     
-    Brightness range: 0-255
-    - Oscuro (0-80): Más sensibilidad, menos blur
-    - Medio (80-170): Valores balanceados
-    - Claro (170-255): Menos sensibilidad, más blur
+    Ecuaciones interpoladas entre:
+    - Brillo bajo (0-80): sens=0.33, blur=19, clip=4.0, tile=8
+    - Brillo medio (80-170): sens=0.5, blur=23, clip=3.0, tile=4
+    
+    Brightness range usado: 0-170
     """
-    if brightness < 80:  # Escena oscura
-        sens = 0.33  # test 1: 0.33
-        blur = 19     # test 1: 19 
-        clip = 4.0   # test 1: 4 
-        tile = 8     # test 1: 8
-    elif brightness < 170:  # Escena con iluminación media
-        sens = 0.5  #test 2: 0.5
-        blur = 23   # test 2: 23
-        clip = 3    # test 2: 3
-        tile = 4    # test 2: 4
-    else:  # Escena muy iluminada
-        sens = 0.39  # test 3: 0.39
-        blur = 17     # test 3: 17
-        clip = 2   # test 3: 2
-        tile = 12     # test 3: 12
+    # Limitar brillo al rango calibrado
+    brightness = min(brightness, 170)
+    
+    # Factor de interpolación normalizado (0.0 a 1.0)
+    t = brightness / 170.0
+    
+    # 1. Sensibilidad: aumenta linealmente de 0.33 a 0.5
+    #    A más luz, mayor sensibilidad para capturar bordes sutiles
+    sens = 0.33 + t * 0.17
+    
+    # 2. Blur kernel: aumenta de 19 a 23
+    #    A más luz, más suavizado para reducir ruido y texturas
+    blur_float = 19.0 + t * 4.0
+    blur = int(round(blur_float))
+    # Asegurar que sea impar
+    if blur % 2 == 0:
+        blur += 1
+    blur = max(1, min(31, blur))  # Limitar a rango válido
+    
+    # 3. CLAHE Clip: decrece de 4.0 a 3.0
+    #    Menos realce de contraste en escenas iluminadas
+    clip = 4.0 - t * 1.0
+    
+    # 4. CLAHE Tile: decrece de 8 a 4
+    #    Tiles más pequeños para mejor adaptación local con luz
+    tile_float = 8.0 - t * 4.0
+    tile = int(round(tile_float))
+    tile = max(2, min(16, tile))  # Limitar a rango válido
     
     return sens, blur, clip, tile
 
@@ -345,7 +411,7 @@ def update_static_contours(closed_contours, static_contours, frame_idx):
 
 
 def main():
-    global calibration_mode
+    global calibration_mode, show_debug_info
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
@@ -698,7 +764,18 @@ def main():
 
         processed_canny = cv2.add(processed_canny, mask_tracks_canny)
 
-        # 5) Actualizar prev_gray y mostrar
+        # 5) Mostrar info de debug si está activado
+        if show_debug_info:
+            num_motion = len(p0_motion) if p0_motion is not None else 0
+            num_canny = len(p0_canny) if p0_canny is not None else 0
+            num_dynamic = len(dynamic_contours)
+            
+            processed_motion = draw_debug_info(
+                processed_motion, brightness, adaptive_sens, adaptive_blur,
+                adaptive_clip, adaptive_tile, num_motion, num_canny, num_dynamic
+            )
+
+        # 6) Actualizar prev_gray y mostrar
         prev_gray = frame_gray.copy()
 
         # Pasar edges a BGR para poder apilarlo
@@ -782,6 +859,13 @@ def main():
             else:
                 cv2.destroyWindow('Calibración Canny')
                 print("Modo calibración DESACTIVADO (modo automático)")
+        elif key == ord('d'):
+            # NUEVO: Alternar visualización de debug
+            show_debug_info = not show_debug_info
+            if show_debug_info:
+                print("Debug info ACTIVADO")
+            else:
+                print("Debug info DESACTIVADO")
 
     cap.release()
     cv2.destroyAllWindows()
