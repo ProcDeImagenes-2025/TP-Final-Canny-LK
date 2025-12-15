@@ -1,6 +1,110 @@
 import cv2
 import numpy as np
 import time
+import os
+import urllib.request
+
+# ---------------------------
+# Configuración Red Neuronal
+# ---------------------------
+DNN_PROTO = "MobileNetSSD_deploy.prototxt"
+DNN_MODEL = "MobileNetSSD_deploy.caffemodel"
+DNN_CONFIDENCE = 0.5
+DNN_CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
+               "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
+               "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
+               "sofa", "train", "tvmonitor"]
+
+def download_model_if_needed():
+    """Descarga el modelo MobileNet-SSD si no existe localmente"""
+    if not os.path.exists(DNN_PROTO):
+        print(f"Descargando {DNN_PROTO}...")
+        try:
+            # URL alternativa que suele ser más estable
+            url_proto = "https://raw.githubusercontent.com/djmv/MobilNet_SSD_opencv/master/MobileNetSSD_deploy.prototxt"
+            urllib.request.urlretrieve(url_proto, DNN_PROTO)
+        except Exception as e:
+            print(f"Error descargando prototxt: {e}")
+    
+    if not os.path.exists(DNN_MODEL):
+        print(f"Descargando {DNN_MODEL}...")
+        try:
+            # URL alternativa que suele ser más estable
+            url_model = "https://raw.githubusercontent.com/djmv/MobilNet_SSD_opencv/master/MobileNetSSD_deploy.caffemodel" 
+            urllib.request.urlretrieve(url_model, DNN_MODEL)
+        except Exception as e:
+            print(f"Error descargando caffemodel: {e}")
+
+def merge_rectangles(rects, threshold=40):
+    """
+    Fusiona rectángulos cercanos o superpuestos.
+    rects: lista de tuplas (x_min, y_min, x_max, y_max)
+    threshold: distancia máxima en píxeles para considerar fusión
+    """
+    if not rects:
+        return []
+    
+    # Convertir a lista de listas para poder modificar
+    merged = [list(r) for r in rects]
+    
+    while True:
+        new_merged = []
+        used = [False] * len(merged)
+        changed = False
+        
+        for i in range(len(merged)):
+            if used[i]:
+                continue
+            
+            # Rectángulo base para intentar fusionar
+            current = merged[i]
+            used[i] = True
+            
+            for j in range(i + 1, len(merged)):
+                if used[j]:
+                    continue
+                
+                other = merged[j]
+                
+                # Verificar cercanía/superposición con threshold
+                # Se tocan si:
+                # A.left < B.right + th AND A.right + th > B.left ...
+                if (current[0] - threshold < other[2] and
+                    current[2] + threshold > other[0] and
+                    current[1] - threshold < other[3] and
+                    current[3] + threshold > other[1]):
+                    
+                    # Fusionar: tomar los límites extremos
+                    current[0] = min(current[0], other[0])
+                    current[1] = min(current[1], other[1])
+                    current[2] = max(current[2], other[2])
+                    current[3] = max(current[3], other[3])
+                    
+                    used[j] = True
+                    changed = True
+            
+            new_merged.append(current)
+        
+        merged = new_merged
+        if not changed:
+            break
+            
+    # Convertir de vuelta a tuplas
+    return [tuple(r) for r in merged]
+
+def check_intersection(boxA, boxB):
+    """
+    Verifica si dos rectángulos se intersectan.
+    box: (x_min, y_min, x_max, y_max)
+    """
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+
+    # Calcular área de intersección
+    interArea = max(0, xB - xA) * max(0, yB - yA)
+    return interArea > 0
 
 # ---------------------------
 # Parámetros Lucas-Kanade
@@ -412,6 +516,17 @@ def update_static_contours(closed_contours, static_contours, frame_idx):
 
 def main():
     global calibration_mode, show_debug_info
+    
+    # Descargar y cargar modelo DNN
+    download_model_if_needed()
+    net = None
+    if os.path.exists(DNN_PROTO) and os.path.exists(DNN_MODEL):
+        print("Cargando red neuronal...")
+        net = cv2.dnn.readNetFromCaffe(DNN_PROTO, DNN_MODEL)
+        print("Red neuronal cargada exitosamente.")
+    else:
+        print("ADVERTENCIA: No se encontraron los archivos del modelo DNN.")
+
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
@@ -448,6 +563,8 @@ def main():
 
     last_reset_time = time.time()
     RESET_INTERVAL = 10.0  # segundos
+    
+    last_detected_objects = [] # Para guardar detecciones entre frames
 
     while True:
         ret, frame = cap.read()
@@ -550,8 +667,44 @@ def main():
         #    de esos contornos dinámicos
         contours_only = cv2.bitwise_and(edges_moving, dynamic_mask)
 
-#        dynamic_bbox = get_dynamic_bounding_box(dynamic_contours)
         dynamic_bboxes = get_dynamic_bounding_boxes(dynamic_contours)
+
+        # --- FUSIONAR RECTÁNGULOS ---
+        # Unir rectángulos cercanos para tener un bounding box más grande y estable
+        merged_bboxes = merge_rectangles(dynamic_bboxes, threshold=50)
+        dynamic_bboxes = merged_bboxes  # Usamos los fusionados para el resto del pipeline
+
+        # --- DETECCIÓN DE OBJETOS (DNN) ---
+        if net is not None and frame_count % 5 == 0:
+            current_detections = []
+            h, w = frame.shape[:2]
+            # Preprocesamiento para MobileNet-SSD
+            blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843, (300, 300), 127.5)
+            net.setInput(blob)
+            detections = net.forward()
+
+            for i in range(detections.shape[2]):
+                confidence = detections[0, 0, i, 2]
+                if confidence > DNN_CONFIDENCE:
+                    idx = int(detections[0, 0, i, 1])
+                    label = DNN_CLASSES[idx]
+                    
+                    # Coordenadas
+                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                    (startX, startY, endX, endY) = box.astype("int")
+                    det_bbox = (startX, startY, endX, endY)
+                    
+                    # Verificar intersección con movimiento
+                    is_moving = False
+                    for m_bbox in dynamic_bboxes:
+                        if check_intersection(det_bbox, m_bbox):
+                            is_moving = True
+                            break
+                    
+                    if is_moving:
+                        current_detections.append((label, confidence, det_bbox))
+            
+            last_detected_objects = current_detections
 
 
         # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO (no estáticos)
@@ -795,6 +948,15 @@ def main():
             for (x_min, y_min, x_max, y_max) in dynamic_bboxes:
                 cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
                 # cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
+
+        # Dibujar objetos detectados por DNN
+        for (label, conf, (startX, startY, endX, endY)) in last_detected_objects:
+            # Rectángulo verde para objetos reconocidos
+            cv2.rectangle(edges_bgr, (startX, startY), (endX, endY), (0, 255, 0), 2)
+            label_text = f"{label}: {conf:.2f}"
+            y = startY - 15 if startY - 15 > 15 else startY + 15
+            cv2.putText(edges_bgr, label_text, (startX, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
 
         # Mostrar la cantidad de contornos cerrados EN MOVIMIENTO
