@@ -5,6 +5,7 @@ import os
 import urllib.request
 import threading
 from utils.frameGrabber import FrameGrabber
+from utils.boundingBox import *
 
 # ---------------------------
 # Configuración de Pantalla
@@ -100,6 +101,63 @@ def merge_rectangles(rects, threshold=40):
     # Convertir de vuelta a tuplas
     return [tuple(r) for r in merged]
 
+def merge_bboxes_enclosing(bboxes, pad=0, iou_thr=0.15, near_thr=50):
+    """
+    Agrupa bboxes que se solapan (IoU) o están 'cerca' (near_thr),
+    y devuelve UNA bbox envolvente por grupo (la que engloba a todas).
+
+    bboxes: [(x0,y0,x1,y1), ...]
+    pad: padding extra (en píxeles) para expandir la bbox final
+    iou_thr: umbral de solapamiento
+    near_thr: tolerancia para considerar cercanía (como tu merge_rectangles)
+    """
+    if not bboxes:
+        return []
+
+    # normalizar a listas mutables
+    boxes = [list(b) for b in bboxes]
+
+    def is_close_or_overlap(a, b):
+        # “cerca” estilo merge_rectangles
+        close = (a[0] - near_thr < b[2] and a[2] + near_thr > b[0] and
+                 a[1] - near_thr < b[3] and a[3] + near_thr > b[1])
+        if close:
+            return True
+        # overlap por IoU
+        return iou(tuple(a), tuple(b)) >= iou_thr
+
+    merged = []
+    used = [False] * len(boxes)
+
+    for i in range(len(boxes)):
+        if used[i]:
+            continue
+
+        # BFS/DFS para armar el componente conexo
+        stack = [i]
+        used[i] = True
+        group = [boxes[i]]
+
+        while stack:
+            k = stack.pop()
+            for j in range(len(boxes)):
+                if used[j]:
+                    continue
+                if is_close_or_overlap(boxes[k], boxes[j]):
+                    used[j] = True
+                    stack.append(j)
+                    group.append(boxes[j])
+
+        # bbox envolvente del grupo
+        x0 = min(g[0] for g in group) - pad
+        y0 = min(g[1] for g in group) - pad
+        x1 = max(g[2] for g in group) + pad
+        y1 = max(g[3] for g in group) + pad
+        merged.append((int(x0), int(y0), int(x1), int(y1)))
+
+    return merged
+
+
 def check_intersection(boxA, boxB):
     """
     Verifica si dos rectángulos se intersectan.
@@ -114,18 +172,8 @@ def check_intersection(boxA, boxB):
     interArea = max(0, xB - xA) * max(0, yB - yA)
     return interArea > 0
 
-def iou(boxA, boxB):
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[2], boxB[2])
-    yB = min(boxA[3], boxB[3])
-    inter = max(0, xB - xA) * max(0, yB - yA)
-    if inter <= 0:
-        return 0.0
-    areaA = max(0, boxA[2] - boxA[0]) * max(0, boxA[3] - boxA[1])
-    areaB = max(0, boxB[2] - boxB[0]) * max(0, boxB[3] - boxB[1])
-    den = areaA + areaB - inter
-    return float(inter) / float(den) if den > 0 else 0.0
+def bbox_union(a, b):
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
 
 
 def appeared_new_region(curr_bboxes, prev_bboxes, iou_thr=0.20, min_area=800):
@@ -618,6 +666,65 @@ def select_input_source():
         else:
             print("Opción inválida. Por favor, seleccione 1 o 2.")
 
+
+def ensure_points_in_bboxes(prev_gray, mask_img, p0, movement_hist, bboxes,
+                            min_pts_per_bbox=6, max_new_per_bbox=25, margin=10):
+    if not bboxes:
+        return p0, movement_hist
+
+    if p0 is None or len(p0) == 0:
+        points_flat = np.empty((0, 2), dtype=np.float32)
+    else:
+        points_flat = p0.reshape(-1, 2)
+
+    # --- NUEVO: feature params sin maxCorners ---
+    fp = dict(feature_params)
+    fp.pop("maxCorners", None)
+
+    for (x0, y0, x1, y1) in bboxes:
+        if points_flat.shape[0] > 0:
+            inside = (
+                (points_flat[:, 0] >= x0) & (points_flat[:, 0] <= x1) &
+                (points_flat[:, 1] >= y0) & (points_flat[:, 1] <= y1)
+            )
+            count_inside = int(np.count_nonzero(inside))
+        else:
+            count_inside = 0
+
+        if count_inside >= min_pts_per_bbox:
+            continue
+
+        roi = np.zeros_like(mask_img)
+        xx0 = max(0, x0 - margin); yy0 = max(0, y0 - margin)
+        xx1 = min(mask_img.shape[1]-1, x1 + margin); yy1 = min(mask_img.shape[0]-1, y1 + margin)
+        cv2.rectangle(roi, (xx0, yy0), (xx1, yy1), 255, -1)
+        roi = cv2.bitwise_and(roi, mask_img)
+
+        new_pts = cv2.goodFeaturesToTrack(
+            prev_gray,
+            mask=roi,
+            maxCorners=max_new_per_bbox,
+            **fp
+        )
+
+        if new_pts is None or len(new_pts) == 0:
+            continue
+
+        if p0 is None or len(p0) == 0:
+            p0 = new_pts
+            movement_hist = np.zeros(len(p0), dtype=np.float32)
+        else:
+            p0 = np.vstack([p0, new_pts])
+            if movement_hist is None:
+                movement_hist = np.zeros(len(p0), dtype=np.float32)
+            else:
+                movement_hist = np.concatenate([movement_hist, np.zeros(len(new_pts), dtype=np.float32)])
+
+        points_flat = p0.reshape(-1, 2)
+
+    return p0, movement_hist
+
+
 def main():
     global calibration_mode, show_debug_info
     
@@ -711,8 +818,8 @@ def main():
     # Cada elemento: {"cx", "cy", "w", "h", "life", "last_seen"}
     static_contours = []
 
-    last_reset_time = time.time()
-    RESET_INTERVAL = 10.0  # segundos
+    # last_reset_time = time.time()
+    # RESET_INTERVAL = 10.0  # segundos
     
     prev_dynamic_bboxes = []
     last_dnn_time = 0.0
@@ -722,7 +829,7 @@ def main():
     #para trackear bounding boxes
     bbox_tracks = []   # cada track: {"id": int, "bbox": (x0,y0,x1,y1), "last_seen": frame_idx}
     next_track_id = 1
-    TRACK_IOU_MATCH = 0.20
+    TRACK_IOU_MATCH = 0.30
     TRACK_TTL = 20     # frames sin verse -> borrar
 
 
@@ -747,17 +854,17 @@ def main():
 
             frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            current_time = time.time()
-            if current_time - last_reset_time >= RESET_INTERVAL:
-                # Resetear puntos y máscaras
-                mask_tracks_motion = np.zeros_like(frame)
-                mask_tracks_canny = np.zeros_like(frame)
-                p0_motion = None
-                p0_canny = None
-                movement_history_canny = None
-                movement_history_motion = None
-                last_reset_time = current_time
-                print("Puntos reseteados automáticamente")
+            # current_time = time.time()
+            # if current_time - last_reset_time >= RESET_INTERVAL:
+            #     # Resetear puntos y máscaras
+            #     mask_tracks_motion = np.zeros_like(frame)
+            #     mask_tracks_canny = np.zeros_like(frame)
+            #     p0_motion = None
+            #     p0_canny = None
+            #     movement_history_canny = None
+            #     movement_history_motion = None
+            #     last_reset_time = current_time
+            #     print("Puntos reseteados automáticamente")
 
 
             # NUEVO: Calcular brillo y ajustar parámetros automáticamente
@@ -841,33 +948,87 @@ def main():
 
             # --- FUSIONAR RECTÁNGULOS ---
             # Unir rectángulos cercanos para tener un bounding box más grande y estable
-            merged_bboxes = merge_rectangles(dynamic_bboxes, threshold=50)
-            dynamic_bboxes = merged_bboxes  # Usamos los fusionados para el resto del pipeline
-            # --- ACTUALIZAR TRACKS CON LAS BBOXES "OBSERVADAS" (dynamic_bboxes) ---
-            updated = set()
+            # merged_bboxes = merge_rectangles(dynamic_bboxes, threshold=50)
+            # dynamic_bboxes = merged_bboxes  # Usamos los fusionados para el resto del pipeline
+
+            dynamic_bboxes = merge_bboxes_enclosing(dynamic_bboxes, pad=10, iou_thr=0.15, near_thr=50)
+
+            # --- MANTENER PUNTOS CANNY POR BBOX (sin resets por tiempo) ---
+            p0_canny, movement_history_canny = ensure_points_in_bboxes(
+                prev_gray=prev_gray,
+                mask_img=edges_moving,              # donde tiene sentido buscar features
+                p0=p0_canny,
+                movement_hist=movement_history_canny,
+                bboxes=[tr["bbox"] for tr in bbox_tracks],
+                min_pts_per_bbox=6,
+                max_new_per_bbox=25,
+                margin=15
+            )
+
+
+           # --- ACTUALIZAR TRACKS CON LAS BBOXES "OBSERVADAS" (dynamic_bboxes) ---
+            matched_tracks = set()   # índices de bbox_tracks usados este frame
 
             for db in dynamic_bboxes:
-                # buscar mejor match
                 best_iou = 0.0
                 best_idx = None
+
                 for i, tr in enumerate(bbox_tracks):
+                    if i in matched_tracks:
+                        continue  # este track ya fue asignado en este frame
+
                     v = iou(db, tr["bbox"])
                     if v > best_iou:
                         best_iou = v
                         best_idx = i
 
                 if best_idx is not None and best_iou >= TRACK_IOU_MATCH:
-                    bbox_tracks[best_idx]["bbox"] = db
+                    oldb = bbox_tracks[best_idx]["bbox"]
+                    bbox_tracks[best_idx]["bbox"] = bbox_union(oldb, db)   # <- clave: unión
                     bbox_tracks[best_idx]["last_seen"] = frame_count
-                    updated.add(best_idx)
+                    matched_tracks.add(best_idx)
                 else:
                     bbox_tracks.append({"id": next_track_id, "bbox": db, "last_seen": frame_count})
                     next_track_id += 1
 
+            # Si una bbox observada cubre múltiples tracks, colapsarlos en uno envolvente
+            new_tracks = []
+            consumed = set()
+
+            for db in dynamic_bboxes:
+                hits = []
+                for idx, tr in enumerate(bbox_tracks):
+                    if idx in consumed:
+                        continue
+                    if iou(db, tr["bbox"]) >= 0.20 or check_intersection(db, tr["bbox"]):
+                        hits.append((idx, tr))
+
+                if len(hits) <= 1:
+                    continue
+
+                # Crear un track único que engloba todos los hits (mantiene el id del primero)
+                keep_idx, keep_tr = hits[0]
+                xs0 = [t["bbox"][0] for _, t in hits]
+                ys0 = [t["bbox"][1] for _, t in hits]
+                xs1 = [t["bbox"][2] for _, t in hits]
+                ys1 = [t["bbox"][3] for _, t in hits]
+
+                enclosing = (min(xs0), min(ys0), max(xs1), max(ys1))
+                keep_tr["bbox"] = bbox_union(keep_tr["bbox"], enclosing)  # <- no shrink
+                keep_tr["last_seen"] = frame_count
+
+
+                for idx, _ in hits[1:]:
+                    consumed.add(idx)
+
+            # Remover tracks consumidos
+            bbox_tracks = [tr for i, tr in enumerate(bbox_tracks) if i not in consumed]
+
+
             # borrar tracks viejos
             bbox_tracks = [tr for tr in bbox_tracks if (frame_count - tr["last_seen"]) <= TRACK_TTL]
 
-
+            bbox_tracks = merge_tracks(bbox_tracks, iou_thr=0.20, contain_thr=0.90)
 
             # # --- DETECCIÓN DE OBJETOS (DNN) ---
             # if net is not None and frame_count % 15 == 0:
@@ -1036,9 +1197,12 @@ def main():
             mask_tracks_canny = cv2.addWeighted(mask_tracks_canny, 0.95, mask_tracks_canny, 0, 0)
             need_new_features_canny = False
             if p0_canny is None:
-                need_new_features_canny = True
-            elif len(p0_canny) < MIN_FEATURES and frame_count % 10 == 0:
-                need_new_features_canny = True
+                p0_canny = cv2.goodFeaturesToTrack(prev_gray, mask=edges_moving, **feature_params)
+                if p0_canny is not None:
+                    movement_history_canny = np.zeros(len(p0_canny), dtype=np.float32)
+                else:
+                    need_new_features_canny = True
+
 
             if need_new_features_canny:
                 p0_canny = cv2.goodFeaturesToTrack(
@@ -1141,6 +1305,7 @@ def main():
                                 dy = float(np.median(flows[idxs, 1]))
                                 moved = (b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy)
                                 tr["bbox"] = clamp_bbox(moved, wF, hF)
+                                tr["last_seen"] = frame_count
 
 
                     if len(good_new_c) > 0:
