@@ -114,6 +114,62 @@ def check_intersection(boxA, boxB):
     interArea = max(0, xB - xA) * max(0, yB - yA)
     return interArea > 0
 
+def iou(boxA, boxB):
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+    inter = max(0, xB - xA) * max(0, yB - yA)
+    if inter <= 0:
+        return 0.0
+    areaA = max(0, boxA[2] - boxA[0]) * max(0, boxA[3] - boxA[1])
+    areaB = max(0, boxB[2] - boxB[0]) * max(0, boxB[3] - boxB[1])
+    den = areaA + areaB - inter
+    return float(inter) / float(den) if den > 0 else 0.0
+
+
+def appeared_new_region(curr_bboxes, prev_bboxes, iou_thr=0.20, min_area=800):
+    """
+    True si:
+      - antes no había nada y ahora sí (con área mínima), o
+      - aparece al menos 1 bbox "nueva" (IoU bajo con todas las previas).
+    """
+    # filtrar ruido por área
+    curr = [b for b in curr_bboxes if (b[2]-b[0]) * (b[3]-b[1]) >= min_area]
+    prev = [b for b in prev_bboxes if (b[2]-b[0]) * (b[3]-b[1]) >= min_area]
+
+    if not prev and curr:
+        return True
+    if not curr:
+        return False
+
+    for cb in curr:
+        best = 0.0
+        for pb in prev:
+            best = max(best, iou(cb, pb))
+        if best < iou_thr:
+            return True
+    return False
+
+def bbox_center(b):
+    return ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5)
+
+def clamp_bbox(b, w, h):
+    x0, y0, x1, y1 = b
+    x0 = max(0, min(w-1, x0))
+    y0 = max(0, min(h-1, y0))
+    x1 = max(0, min(w-1, x1))
+    y1 = max(0, min(h-1, y1))
+    if x1 <= x0: x1 = min(w-1, x0+1)
+    if y1 <= y0: y1 = min(h-1, y0+1)
+    return (int(x0), int(y0), int(x1), int(y1))
+
+def point_in_bbox(p, b, margin=0):
+    x, y = p
+    return (b[0]-margin) <= x <= (b[2]+margin) and (b[1]-margin) <= y <= (b[3]+margin)
+
+
+
 # ---------------------------
 # Parámetros Lucas-Kanade
 # ---------------------------
@@ -658,6 +714,19 @@ def main():
     last_reset_time = time.time()
     RESET_INTERVAL = 10.0  # segundos
     
+    prev_dynamic_bboxes = []
+    last_dnn_time = 0.0
+    DNN_COOLDOWN_SEC = 0.25   # evita spamear si hay “aparece” en frames consecutivos
+
+    
+    #para trackear bounding boxes
+    bbox_tracks = []   # cada track: {"id": int, "bbox": (x0,y0,x1,y1), "last_seen": frame_idx}
+    next_track_id = 1
+    TRACK_IOU_MATCH = 0.20
+    TRACK_TTL = 20     # frames sin verse -> borrar
+
+
+
     last_detected_objects = [] # Para guardar detecciones entre frames
     try:
         while True:
@@ -774,12 +843,77 @@ def main():
             # Unir rectángulos cercanos para tener un bounding box más grande y estable
             merged_bboxes = merge_rectangles(dynamic_bboxes, threshold=50)
             dynamic_bboxes = merged_bboxes  # Usamos los fusionados para el resto del pipeline
+            # --- ACTUALIZAR TRACKS CON LAS BBOXES "OBSERVADAS" (dynamic_bboxes) ---
+            updated = set()
 
-            # --- DETECCIÓN DE OBJETOS (DNN) ---
-            if net is not None and frame_count % 15 == 0:
+            for db in dynamic_bboxes:
+                # buscar mejor match
+                best_iou = 0.0
+                best_idx = None
+                for i, tr in enumerate(bbox_tracks):
+                    v = iou(db, tr["bbox"])
+                    if v > best_iou:
+                        best_iou = v
+                        best_idx = i
+
+                if best_idx is not None and best_iou >= TRACK_IOU_MATCH:
+                    bbox_tracks[best_idx]["bbox"] = db
+                    bbox_tracks[best_idx]["last_seen"] = frame_count
+                    updated.add(best_idx)
+                else:
+                    bbox_tracks.append({"id": next_track_id, "bbox": db, "last_seen": frame_count})
+                    next_track_id += 1
+
+            # borrar tracks viejos
+            bbox_tracks = [tr for tr in bbox_tracks if (frame_count - tr["last_seen"]) <= TRACK_TTL]
+
+
+
+            # # --- DETECCIÓN DE OBJETOS (DNN) ---
+            # if net is not None and frame_count % 15 == 0:
+            #     current_detections = []
+            #     h, w = frame.shape[:2]
+            #     # Preprocesamiento para MobileNet-SSD
+            #     blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843, (300, 300), 127.5)
+            #     net.setInput(blob)
+            #     detections = net.forward()
+
+            #     for i in range(detections.shape[2]):
+            #         confidence = detections[0, 0, i, 2]
+            #         if confidence > DNN_CONFIDENCE:
+            #             idx = int(detections[0, 0, i, 1])
+            #             label = DNN_CLASSES[idx]
+                        
+            #             # Coordenadas
+            #             box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            #             (startX, startY, endX, endY) = box.astype("int")
+            #             det_bbox = (startX, startY, endX, endY)
+                        
+            #             # Verificar intersección con movimiento
+            #             is_moving = False
+            #             for m_bbox in dynamic_bboxes:
+            #                 if check_intersection(det_bbox, m_bbox):
+            #                     is_moving = True
+            #                     break
+                        
+            #             if is_moving:
+            #                 current_detections.append((label, confidence, det_bbox))
+                
+            #     last_detected_objects = current_detections
+
+            # --- DETECCIÓN DE OBJETOS (DNN) SOLO SI APARECE ALGO NUEVO ---
+            run_dnn = False
+            if net is not None:
+                now = time.time()
+                if (now - last_dnn_time) >= DNN_COOLDOWN_SEC:
+                    if appeared_new_region(dynamic_bboxes, prev_dynamic_bboxes, iou_thr=0.20, min_area=800):
+                        run_dnn = True
+                        last_dnn_time = now
+
+            if run_dnn:
                 current_detections = []
                 h, w = frame.shape[:2]
-                # Preprocesamiento para MobileNet-SSD
+
                 blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 0.007843, (300, 300), 127.5)
                 net.setInput(blob)
                 detections = net.forward()
@@ -789,23 +923,20 @@ def main():
                     if confidence > DNN_CONFIDENCE:
                         idx = int(detections[0, 0, i, 1])
                         label = DNN_CLASSES[idx]
-                        
-                        # Coordenadas
+
                         box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
                         (startX, startY, endX, endY) = box.astype("int")
                         det_bbox = (startX, startY, endX, endY)
-                        
-                        # Verificar intersección con movimiento
-                        is_moving = False
-                        for m_bbox in dynamic_bboxes:
-                            if check_intersection(det_bbox, m_bbox):
-                                is_moving = True
-                                break
-                        
+
+                        # Confirmar que intersecta movimiento
+                        is_moving = any(check_intersection(det_bbox, m_bbox) for m_bbox in dynamic_bboxes)
                         if is_moving:
                             current_detections.append((label, confidence, det_bbox))
-                
+
                 last_detected_objects = current_detections
+
+            # IMPORTANTE: actualizar “prev” SIEMPRE (corras o no la DNN)
+            prev_dynamic_bboxes = list(dynamic_bboxes)
 
 
             # Crear imagen negra solo con contornos cerrados EN MOVIMIENTO (no estáticos)
@@ -990,6 +1121,28 @@ def main():
                     good_new_c = p1c_flat[valid_c]
                     good_old_c = p0c_flat[valid_c]
 
+                    # --- MOVER BBOX TRACKS CON EL FLUJO OPTICO (CANNY LK) ---
+                    if len(good_new_c) > 0 and len(bbox_tracks) > 0:
+                        hF, wF = frame.shape[:2]
+                        # vectores por punto
+                        flows = good_new_c - good_old_c  # (N,2)
+
+                        for tr in bbox_tracks:
+                            b = tr["bbox"]
+
+                            # puntos cuyo "old" cae dentro de la bbox
+                            idxs = []
+                            for k, pold in enumerate(good_old_c):
+                                if point_in_bbox(pold, b, margin=5):
+                                    idxs.append(k)
+
+                            if len(idxs) >= 3:
+                                dx = float(np.median(flows[idxs, 0]))
+                                dy = float(np.median(flows[idxs, 1]))
+                                moved = (b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy)
+                                tr["bbox"] = clamp_bbox(moved, wF, hF)
+
+
                     if len(good_new_c) > 0:
                         for (new, old) in zip(good_new_c, good_old_c):
                             a, b = new.ravel()
@@ -1017,6 +1170,17 @@ def main():
                     movement_history_canny = None
 
             processed_canny = cv2.add(processed_canny, mask_tracks_canny)
+            # --- DIBUJAR BBOX TRACKS EN ABAJO-DERECHA (processed_canny) Y ARRIBA-IZQUIERDA (frame) ---
+            for tr in bbox_tracks:
+                x0, y0, x1, y1 = tr["bbox"]
+                cv2.rectangle(processed_canny, (x0, y0), (x1, y1), (0, 255, 255), 2)
+                cv2.putText(processed_canny, f"trk {tr['id']}", (x0, max(0, y0-8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+                cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 255, 255), 2)
+                cv2.putText(frame, f"trk {tr['id']}", (x0, max(0, y0-8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
 
             # 5) Mostrar info de debug si está activado
             if show_debug_info:
