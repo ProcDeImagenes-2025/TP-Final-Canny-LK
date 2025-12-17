@@ -6,9 +6,16 @@ class FrameGrabber:
     Hilo dedicado a leer frames continuamente y quedarse siempre con el último.
     Evita backlog/buffer cuando el procesamiento es lento.
     """
-    def __init__(self, src, api_preference=cv2.CAP_FFMPEG):
+    def __init__(self, src, api_preference=None):
         self.src = src
-        self.api_preference = api_preference
+        # Si no se especifica, usar DSHOW para Windows (mejor para webcams)
+        if api_preference is None:
+            if isinstance(src, int):  # Es una cámara
+                self.api_preference = cv2.CAP_DSHOW
+            else:  # Es RTSP o video
+                self.api_preference = cv2.CAP_FFMPEG
+        else:
+            self.api_preference = api_preference
         self.cap = None
 
         self._lock = threading.Lock()

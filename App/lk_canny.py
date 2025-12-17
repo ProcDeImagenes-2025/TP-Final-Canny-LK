@@ -9,8 +9,8 @@ from utils.frameGrabber import FrameGrabber
 # ---------------------------
 # Configuración de Pantalla
 # ---------------------------
-TARGET_W = 1000
-TARGET_H = 600
+TARGET_W = 1600  # Aumentado de 1000
+TARGET_H = 900   # Aumentado de 600
 
 # ---------------------------
 # Configuración Red Neuronal
@@ -522,6 +522,44 @@ def update_static_contours(closed_contours, static_contours, frame_idx):
 
 
 
+def select_input_source():
+    """Permite al usuario seleccionar entre cámara o video"""
+    print("\n=== SELECCIÓN DE FUENTE ===")
+    print("1. Cámara (webcam)")
+    print("2. Video desde carpeta Video/")
+    
+    while True:
+        choice = input("Seleccione una opción (1 o 2): ").strip()
+        if choice == "1":
+            return 0  # Cámara por defecto
+        elif choice == "2":
+            # Listar videos disponibles
+            video_folder = "Video"
+            if not os.path.exists(video_folder):
+                print(f"ERROR: La carpeta '{video_folder}' no existe.")
+                continue
+            
+            videos = [f for f in os.listdir(video_folder) if f.endswith(('.mp4', '.avi', '.mov', '.mkv'))]
+            if not videos:
+                print(f"No se encontraron videos en la carpeta '{video_folder}'")
+                continue
+            
+            print("\nVideos disponibles:")
+            for i, vid in enumerate(videos, 1):
+                print(f"{i}. {vid}")
+            
+            vid_choice = input(f"Seleccione un video (1-{len(videos)}): ").strip()
+            try:
+                vid_idx = int(vid_choice) - 1
+                if 0 <= vid_idx < len(videos):
+                    return os.path.join(video_folder, videos[vid_idx])
+                else:
+                    print("Opción inválida")
+            except ValueError:
+                print("Entrada inválida")
+        else:
+            print("Opción inválida. Por favor, seleccione 1 o 2.")
+
 def main():
     global calibration_mode, show_debug_info
     
@@ -535,25 +573,62 @@ def main():
     else:
         print("ADVERTENCIA: No se encontraron los archivos del modelo DNN.")
 
-    #cap = cv2.VideoCapture("rtsp://admin:12345678Ab@192.168.1.11:554/1/1?transport=tcp")
-    src = "rtsp://admin:12345678Ab@192.168.1.11:554/1/1?transport=tcp"
+    # Seleccionar fuente de entrada
+    src = select_input_source()
+    print(f"\nUsando fuente: {src if isinstance(src, str) else 'Cámara'}\n")
 
-    grabber = FrameGrabber(src).start()
+    # Decidir si usar FrameGrabber (para cámara/RTSP) o VideoCapture directo (para videos)
+    use_grabber = not isinstance(src, str)  # True si es cámara (int), False si es video (str)
+    
+    if use_grabber:
+        # Cámara/RTSP: usar FrameGrabber con threading
+        try:
+            grabber = FrameGrabber(src).start()
+            frame_delay = 1
+            cap = None
+        except RuntimeError as e:
+            print(f"\nERROR: {e}")
+            print("Posibles soluciones:")
+            print("- Verifica que la cámara esté conectada")
+            print("- Cierra otras aplicaciones que usen la cámara")
+            print("- Intenta con un video en su lugar")
+            return
+    else:
+        # Video: usar VideoCapture directo (sin threading para no saltar frames)
+        cap = cv2.VideoCapture(src)
+        if not cap.isOpened():
+            print("ERROR: No se pudo abrir el video.")
+            return
+        
+        video_fps = cap.get(cv2.CAP_PROP_FPS)
+        if video_fps > 0:
+            frame_delay = int(1000 / video_fps)
+            print(f"FPS del video: {video_fps:.2f} | Delay: {frame_delay}ms")
+        else:
+            frame_delay = 30
+        grabber = None
 
     #Primer frame
-    ret, first_frame = grabber.read()
-    forceExit = False
-    timeout = 100
-    while not ret and not forceExit:
+    if use_grabber:
         ret, first_frame = grabber.read()
-        time.sleep(0.01)
-        timeout -= 1
-        if timeout == 0:
-            forceExit = True
-    if forceExit:
-        print("No se pudo leer el primer frame.")
-        grabber.stop()
-        return
+        forceExit = False
+        timeout = 100
+        while not ret and not forceExit:
+            ret, first_frame = grabber.read()
+            time.sleep(0.01)
+            timeout -= 1
+            if timeout == 0:
+                forceExit = True
+        if forceExit:
+            print("No se pudo leer el primer frame.")
+            grabber.stop()
+            return
+    else:
+        ret, first_frame = cap.read()
+        if not ret:
+            print("No se pudo leer el primer frame del video.")
+            cap.release()
+            return
 
     # Espejar para que refleje movimientos naturales
     first_frame = cv2.flip(first_frame, 1)
@@ -582,11 +657,17 @@ def main():
     last_detected_objects = [] # Para guardar detecciones entre frames
     try:
         while True:
-            ret, frame = grabber.read()
-            if not ret:
-                time.sleep(0.01)
-                print("No se pudo leer un frame.")
-                continue
+            if use_grabber:
+                ret, frame = grabber.read()
+                if not ret:
+                    time.sleep(0.01)
+                    print("No se pudo leer un frame.")
+                    continue
+            else:
+                ret, frame = cap.read()
+                if not ret:
+                    print("Video terminado.")
+                    break
 
             # Espejar
             frame = cv2.flip(frame, 1)
@@ -965,7 +1046,7 @@ def main():
                     cv2.rectangle(edges_bgr, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
                     # cv2.rectangle(processed_canny, (x_min, y_min), (x_max, y_max), (0, 255, 255), 2)
 
-            # Dibujar objetos detectados por DNN
+            # Dibujar objetos detectados por DNN en edges_bgr
             for (label, conf, (startX, startY, endX, endY)) in last_detected_objects:
                 # Rectángulo verde para objetos reconocidos
                 cv2.rectangle(edges_bgr, (startX, startY), (endX, endY), (0, 255, 0), 2)
@@ -973,6 +1054,15 @@ def main():
                 y = startY - 15 if startY - 15 > 15 else startY + 15
                 cv2.putText(edges_bgr, label_text, (startX, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+            # Dibujar objetos detectados por DNN en el FRAME ORIGINAL
+            for (label, conf, (startX, startY, endX, endY)) in last_detected_objects:
+                # Rectángulo verde para objetos reconocidos en movimiento
+                cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 3)
+                label_text = f"{label}: {conf:.2f}"
+                y = startY - 15 if startY - 15 > 15 else startY + 15
+                cv2.putText(frame, label_text, (startX, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
 
             # Mostrar la cantidad de contornos cerrados EN MOVIMIENTO
@@ -1027,7 +1117,7 @@ def main():
 
             cv2.imshow("Arriba: original | LK movimiento  |  Abajo: Canny MEJORADO | LK usando Canny", combined_resized)
 
-            key = cv2.waitKey(1) & 0xFF
+            key = cv2.waitKey(frame_delay) & 0xFF
             if key == ord('q'):
                 break
             elif key == ord('e'):
@@ -1055,7 +1145,10 @@ def main():
                 else:
                     print("Debug info DESACTIVADO")
     finally:
-        grabber.stop()
+        if use_grabber and grabber is not None:
+            grabber.stop()
+        if cap is not None:
+            cap.release()
         cv2.destroyAllWindows()
 
 
