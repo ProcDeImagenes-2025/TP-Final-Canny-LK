@@ -532,6 +532,8 @@ def select_input_source():
         choice = input("Seleccione una opción (1 o 2): ").strip()
         if choice == "1":
             return 0  # Cámara por defecto
+        elif choice == "3":
+            return "rtsp://admin:12345678Ab@192.168.1.11:554/1/1?transport=tcp"
         elif choice == "2":
             # Listar videos disponibles
             video_folder = "Video"
@@ -578,7 +580,9 @@ def main():
     print(f"\nUsando fuente: {src if isinstance(src, str) else 'Cámara'}\n")
 
     # Decidir si usar FrameGrabber (para cámara/RTSP) o VideoCapture directo (para videos)
-    use_grabber = not isinstance(src, str)  # True si es cámara (int), False si es video (str)
+    use_grabber = isinstance(src, int) or (
+            isinstance(src,str) and src.startswith("rtsp")
+            )# True si es cámara (int o  "rtsp"), False si es video (str)
     
     if use_grabber:
         # Cámara/RTSP: usar FrameGrabber con threading
@@ -772,7 +776,7 @@ def main():
             dynamic_bboxes = merged_bboxes  # Usamos los fusionados para el resto del pipeline
 
             # --- DETECCIÓN DE OBJETOS (DNN) ---
-            if net is not None and frame_count % 5 == 0:
+            if net is not None and frame_count % 15 == 0:
                 current_detections = []
                 h, w = frame.shape[:2]
                 # Preprocesamiento para MobileNet-SSD
