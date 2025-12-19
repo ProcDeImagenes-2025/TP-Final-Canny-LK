@@ -848,7 +848,7 @@ def main():
 
                 last_detected_objects = current_detections
 
-            # IMPORTANTE: actualizar “prev” SIEMPRE (corras o no la DNN)
+            # IMPORTANTE: actualizar “prev” SIEMPRE (se corra o no la DNN)
             prev_dynamic_bboxes = list(dynamic_bboxes)
 
             frame_count += 1
@@ -993,7 +993,7 @@ def main():
                     movement_history_canny += disp_c
 
                     
-                    # inside_bbox_c = filter_points_by_bbox(p1c, dynamic_bbox, margin=20)
+                    #inside_bbox_c = filter_points_by_bbox(p1c, dynamic_bbox, margin=20)
                     inside_bbox_c = filter_points_by_bboxes(p1c, dynamic_bboxes, margin=20)
 
                     has_moved_before_c = movement_history_canny >= MIN_MOVEMENT_HISTORY
@@ -1004,7 +1004,7 @@ def main():
                     good_new_c = p1c_flat[valid_c]
                     good_old_c = p0c_flat[valid_c]
 
-                    # --- MOVER BBOX TRACKS CON EL FLUJO OPTICO (CANNY LK) ---
+                    #MOVER BBOX TRACKS CON EL FLUJO OPTICO (CANNY LK)
                     if len(good_new_c) > 0 and len(bbox_tracks) > 0:
                         hF, wF = frame.shape[:2]
                         # vectores por punto

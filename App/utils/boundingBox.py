@@ -80,7 +80,7 @@ def merge_tracks(tracks, iou_thr=0.20, contain_thr=0.90):
     if not tracks:
         return []
 
-    tracks = [dict(t) for t in tracks]  # copia superficial
+    tracks = [dict(t) for t in tracks]  # copia
     used = [False] * len(tracks)
     out = []
 

@@ -1,5 +1,6 @@
 import cv2
 import threading
+import time
 
 class FrameGrabber:
     """
@@ -31,12 +32,6 @@ class FrameGrabber:
         if not self.cap.isOpened():
             raise RuntimeError("No se pudo abrir la cámara (VideoCapture).")
 
-        # Importante en RTSP: reduce buffering (no siempre aplica según backend)
-        #try:
-        #    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        #except Exception:
-        #    pass
-
         self._running = True
         self._thread = threading.Thread(target=self._reader, daemon=True)
         self._thread.start()
@@ -46,18 +41,16 @@ class FrameGrabber:
         while self._running:
             ok, frame = self.cap.read()
             if not ok:
-                # Si la cámara corta, marcamos como inválido y seguimos intentando
+                # Si la cámara corta, el frame es inválido pero intento de nuevo
                 with self._lock:
                     self._ok = False
                     self._frame = None
-                # Pequeña pausa para no quemar CPU si la cámara está caída
                 time.sleep(0.01)
                 continue
 
             with self._lock:
                 self._ok = True
-                self._frame = frame  # siempre pisa el frame anterior
-
+                self._frame = frame 
     def read(self):
         """
         Devuelve (ok, frame_copy). frame_copy es una copia para evitar data races.
