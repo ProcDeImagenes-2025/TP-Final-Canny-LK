@@ -148,3 +148,5 @@ Las bboxes pueden desplazarse utilizando el flujo óptico estimado sobre puntos 
 - Vista combinada 2x2 reescalada para presentación.
 
 ---
+## Posibles mejoras
+El sistema de mergeo de bounding boxes para evitar que coexistan demasiadas de ellas, pequeñas y superpuestas, no permite que la bounding box se vuelva más pequeña. Esto es perjudicial pues la bounding box resultante al poco tiempo de correr el sistema se vuelve del tamaño de la imagen, y el trackeo de esa BBox ya no se hace correctamente.
